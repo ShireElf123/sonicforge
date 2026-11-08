@@ -99,19 +99,24 @@ export const InstantAutoMasterView: React.FC<Props> = ({
   const [resolvedGenreLabel, setResolvedGenreLabel] = useState<string>('Auto-Detected');
   const [zipStatus, setZipStatus] = useState<string | null>(null);
 
-  const lastAutoSourceRef = useRef<PlanarAudioBuffer | null>(null);
+  const lastAutoKeyRef = useRef<{ buf: PlanarAudioBuffer | null; hasSweetSpot: boolean }>({
+    buf: null,
+    hasSweetSpot: false,
+  });
 
   const runInstantMaster = (
     nextGenre: AutopilotGenreId,
     nextIntensity: AutoMasterIntensity,
-    srcReport = sourceAnalysis
+    srcReport = sourceAnalysis,
+    curIssues = mixDoctorIssues,
+    curSweet = sweetSpot
   ) => {
     const solved = computeAdaptiveAutoMasterParams({
       genre: nextGenre,
       intensity: nextIntensity,
       source: srcReport,
-      issues: mixDoctorIssues,
-      sweetSpot,
+      issues: curIssues,
+      sweetSpot: curSweet,
       currentMeta: params.exportFormat,
     });
     setResolvedGenreLabel(solved.resolvedGenreLabel);
@@ -122,14 +127,20 @@ export const InstantAutoMasterView: React.FC<Props> = ({
     }
   };
 
-  // Automatically master whenever a brand-new track finishes loading & analyzing!
+  // Automatically master whenever a track loads — and re-calibrate once Sweet-Spot + Mix Doctor arrive!
   useEffect(() => {
     if (!sourceBuffer || !sourceAnalysis) return;
-    if (lastAutoSourceRef.current === sourceBuffer) return;
-    lastAutoSourceRef.current = sourceBuffer;
-    runInstantMaster(selectedGenre, intensity, sourceAnalysis);
+    const hasSweet = Boolean(sweetSpot);
+    if (
+      lastAutoKeyRef.current.buf === sourceBuffer &&
+      (lastAutoKeyRef.current.hasSweetSpot || !hasSweet)
+    ) {
+      return;
+    }
+    lastAutoKeyRef.current = { buf: sourceBuffer, hasSweetSpot: hasSweet };
+    runInstantMaster(selectedGenre, intensity, sourceAnalysis, mixDoctorIssues, sweetSpot);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceBuffer, sourceAnalysis]);
+  }, [sourceBuffer, sourceAnalysis, mixDoctorIssues, sweetSpot]);
 
   const readiness = useMemo(
     () => computeArtistReadinessScorecard(masterAnalysis, params),

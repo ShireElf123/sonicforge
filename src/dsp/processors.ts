@@ -473,7 +473,9 @@ export function applyStereoImager(
   }
 
   if (params.bassMonoEnabled && params.bassMonoHz >= 25) {
+    // 24 dB/oct Linkwitz-Riley 4th-order Elliptical Side High-Pass for rock-solid club/vinyl mono sub
     const hpCoeffs = designButterworthHighpass2(params.bassMonoHz, sampleRate);
+    new BiquadFilter(hpCoeffs).processInPlace(side);
     new BiquadFilter(hpCoeffs).processInPlace(side);
   }
 

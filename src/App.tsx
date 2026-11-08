@@ -483,13 +483,15 @@ export const App: React.FC = () => {
       setErrorBanner(null);
       playbackEngine.stop();
       setDemixNullDb(null);
-      setRenderStatus({ active: true, stage: `Decoding "${file.name}"`, pct: 20 });
+      setRenderStatus({ active: true, stage: `Decoding & analyzing "${file.name}"`, pct: 20 });
       const decoded = await decodeUploadedAudioFile(file);
-      const srcRep = await dspWorker.analyze(
-        decoded,
-        params.limiter.ceilingDbtp,
-        params.limiter.oversampling
-      );
+      const [srcRep, diag] = await Promise.all([
+        dspWorker.analyze(decoded, params.limiter.ceilingDbtp, params.limiter.oversampling),
+        dspWorker.diagnoseSource(decoded, createDefaultMasteringParams('spotify')),
+      ]);
+
+      setMixDoctorIssues(diag.issues);
+      setSweetSpot(diag.sweetSpot);
       setWorkflowMode('stereo');
       setTrackName(file.name);
       setSourceBuffer(decoded);
@@ -504,7 +506,9 @@ export const App: React.FC = () => {
       );
       setAssistantRationale(rec.rationale);
       setAssistantWarnings(rec.warnings);
-      updateParams(rec.params);
+      if (uiMode !== 'auto_simple') {
+        updateParams(rec.params);
+      }
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Failed to decode uploaded file.');
       setRenderStatus({ active: false, stage: '', pct: 0 });

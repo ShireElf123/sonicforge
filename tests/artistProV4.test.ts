@@ -238,4 +238,67 @@ describe('SonicForge Pro v4.0 — Guided Artist Autopilot & Next-Gen Mastering E
     const rendered = renderMasterChain(mix, loudAfro.params);
     expect(rendered.analysis.truePeak.truePeakDbtp).toBeLessThanOrEqual(-0.75);
   });
+
+  it('Easy Auto-Master turns both muddy/quiet bedroom mixes AND hot pre-clipped bounces into commercial masters', () => {
+    const sr = 48000;
+    const N = Math.floor(sr * 1.8);
+    const muddyL = new Float32Array(N);
+    const muddyR = new Float32Array(N);
+
+    // 1. Quiet (-23 LUFS), muddy (heavy 290 Hz), out-of-phase bass bedroom bounce
+    for (let i = 0; i < N; i++) {
+      const t = i / sr;
+      const outOfPhaseSub = 0.045 * Math.sin(2 * Math.PI * 72 * t);
+      const boxyMud = 0.095 * Math.sin(2 * Math.PI * 290 * t);
+      const dullVocal = 0.015 * Math.sin(2 * Math.PI * 2800 * t);
+      muddyL[i] = outOfPhaseSub + boxyMud + dullVocal;
+      muddyR[i] = -outOfPhaseSub + boxyMud + dullVocal;
+    }
+    const muddyMix: PlanarAudioBuffer = { sampleRate: sr, duration: 1.8, channels: [muddyL, muddyR] };
+    const muddySrcRep = analyzeAudioBuffer(muddyMix);
+    const muddyIssues = diagnoseMixHeadroomThieves(muddyMix);
+
+    const solvedMuddy = computeAdaptiveAutoMasterParams({
+      genre: 'trap_hiphop',
+      intensity: 'balanced_pro',
+      source: muddySrcRep,
+      issues: muddyIssues,
+    });
+
+    expect(solvedMuddy.params.eqPhaseMode).toBe('linear');
+    expect(solvedMuddy.params.limiter.oversampling).toBe(16);
+    expect(solvedMuddy.params.exportFormat.dither).toBe('tpdf_shaped');
+    expect(solvedMuddy.params.inputGainDb).toBeGreaterThan(2.0); // Pre-gain staged up into sweet spot
+    expect(solvedMuddy.params.eqBands[2].gainDb).toBeLessThan(-0.8); // Cut 290 Hz mud automatically!
+    expect(solvedMuddy.params.eqBands[3].gainDb).toBeGreaterThan(0.5); // Lifted dull vocal clarity!
+
+    const masteredMuddy = renderMasterChain(muddyMix, solvedMuddy.params);
+    expect(masteredMuddy.analysis.stereo.lowBandCorrelation).toBeGreaterThan(0.8); // Phase fixed!
+    expect(masteredMuddy.analysis.truePeak.truePeakDbtp).toBeLessThanOrEqual(-0.95);
+
+    // 2. Already-hot / pre-clipped FL Studio bounce (-7.8 LUFS, low PLR)
+    const hotL = new Float32Array(N);
+    const hotR = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const t = i / sr;
+      const raw =
+        0.6 * Math.sin(2 * Math.PI * 65 * t) +
+        0.45 * Math.sin(2 * Math.PI * 440 * t) +
+        0.35 * Math.sin(2 * Math.PI * 3000 * t);
+      hotL[i] = Math.tanh(raw * 1.8) * 0.72;
+      hotR[i] = Math.tanh(raw * 1.8) * 0.72;
+    }
+    const hotMix: PlanarAudioBuffer = { sampleRate: sr, duration: 1.8, channels: [hotL, hotR] };
+    const hotRep = analyzeAudioBuffer(hotMix);
+
+    const solvedHot = computeAdaptiveAutoMasterParams({
+      genre: 'trap_hiphop',
+      intensity: 'balanced_pro',
+      source: hotRep,
+    });
+
+    // Backs off input gain and relaxes multiband ratios to 1.22:1 so it NEVER double-squashes!
+    expect(solvedHot.params.inputGainDb).toBeLessThan(-2.0);
+    expect(solvedHot.params.multiband.bands[0].ratio).toBeLessThanOrEqual(1.25);
+  });
 });
