@@ -275,35 +275,71 @@ export function solveNaturalLanguageMasteringCopilot(args: {
       q.includes('beatport')
     ) {
       next.deliveryProfile = 'club_loud';
-      next.limiter.targetLufs = q.includes('very loud') || q.includes('slam') ? -7.8 : -9.0;
+      next.limiter.targetLufs = q.includes('very loud') || q.includes('slam') ? -7.2 : -8.5;
       next.limiter.ceilingDbtp = -0.8;
-      next.limiter.releaseMode = 'irc_transient';
+      next.limiter.releaseMode = 'irc_spectral';
       next.limiter.transientEmphasisPct = 68;
-      next.limiter.oversampling = 8;
+      next.limiter.oversampling = 16;
+      next.limiter.softClipEnabled = true;
+      next.limiter.softClipMode = 'crisp_cubic';
+      next.limiter.softClipThresholdDb = -1.6;
+      next.limiter.softClipAmountPct = 50;
       next.eqPhaseMode = 'linear';
       patchItems.push({
-        module: 'Maximizer',
-        summary: `Club Master: ${next.limiter.targetLufs.toFixed(1)} LUFS, IRC-V Transient Split (68%), 8x True Peak`,
+        module: 'Maximizer + Soft Clipper',
+        summary: `Club Master: ${next.limiter.targetLufs.toFixed(1)} LUFS, IRC-IV Spectral Split + 4x Soft Clipper (50%) + 16x True Peak`,
       });
       patchItems.push({
         module: 'EQ Phase',
         summary: 'Switched to 2049-tap Zero-Phase Linear FIR EQ for tight club kick alignment',
       });
       notes.push(
-        `Engaged IRC-V Transient/Sustain Split with 8x polyphase True-Peak detection so kick/snare transients cut through dense ${next.limiter.targetLufs.toFixed(1)} LUFS limiting.`
+        `Engaged 4x polyphase oversampled Soft Clipper + IRC-IV Spectral Subband Split + 16x Kaiser-Sinc True-Peak detection so kick/snare transients punch cleanly at ${next.limiter.targetLufs.toFixed(1)} LUFS without pumping vocals.`
       );
     } else if (q.includes('club')) {
-      next.limiter.releaseMode = 'irc_transient';
-      next.limiter.oversampling = 8;
+      next.limiter.releaseMode = 'irc_spectral';
+      next.limiter.oversampling = 16;
+      next.limiter.softClipEnabled = true;
     }
-  } else if (q.includes('club') || q.includes('loud')) {
-    next.limiter.releaseMode = 'irc_transient';
+  } else if (q.includes('club') || q.includes('loud') || q.includes('clip')) {
+    next.limiter.releaseMode = 'irc_spectral';
     next.limiter.transientEmphasisPct = 65;
-    next.limiter.oversampling = 8;
+    next.limiter.oversampling = 16;
+    next.limiter.softClipEnabled = true;
+    next.limiter.softClipMode = 'crisp_cubic';
+    next.limiter.softClipThresholdDb = -1.6;
+    next.limiter.softClipAmountPct = 50;
     patchItems.push({
-      module: 'Maximizer',
-      summary: 'IRC-V Transient/Sustain Split (65%) + 8x Polyphase True Peak',
+      module: 'Maximizer + Soft Clipper',
+      summary: 'IRC-IV Spectral Subband Split + 4x Soft Clipper (50%) + 16x Polyphase True Peak',
     });
+  }
+
+  // 3b. Explicit Soft Clipper / Dynamic EQ intent
+  if (q.includes('soft clip') || q.includes('clipper')) {
+    next.limiter.softClipEnabled = true;
+    next.limiter.softClipMode = q.includes('warm') ? 'warm_tanh' : 'crisp_cubic';
+    next.limiter.softClipThresholdDb = -1.8;
+    next.limiter.softClipAmountPct = 55;
+    patchItems.push({
+      module: '4x Soft Clipper',
+      summary: `Enabled 4x Oversampled Soft Clipper (${next.limiter.softClipMode}, 55% blend @ -1.8 dB)`,
+    });
+  }
+  if (q.includes('dynamic eq') || q.includes('mud')) {
+    if (next.eqBands[2]) {
+      next.eqBands[2].enabled = true;
+      next.eqBands[2].freqHz = 285;
+      next.eqBands[2].q = 1.6;
+      next.eqBands[2].placement = 'mid';
+      next.eqBands[2].dynEnabled = true;
+      next.eqBands[2].dynThresholdDb = -21;
+      next.eqBands[2].dynRangeDb = -3.5;
+      patchItems.push({
+        module: 'Pro-Q Dynamic EQ',
+        summary: 'Enabled Mid Dynamic Cut (-3.5 dB range @ 285 Hz) to clear low-mid buildup dynamically',
+      });
+    }
   }
 
   // 4. Vocal clarity / presence / cut-through

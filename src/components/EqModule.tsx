@@ -56,7 +56,6 @@ export const EqModule: React.FC<Props> = ({
       })
       .join(' ');
 
-  // Dynamic Spectral Stabilizer attenuation overlay (negative dB plotted downward from 0 dB centerline)
   const stabPath =
     stabilizer.enabled && stabilizerAttenuationDb.length > 0
       ? stabilizerAttenuationDb
@@ -73,11 +72,11 @@ export const EqModule: React.FC<Props> = ({
       <div className="panel">
         <div className="panel-header">
           <div className="panel-title">
-            <span>6-Band Parametric M/S Mastering EQ</span>
+            <span>6-Band Dynamic M/S Mastering EQ</span>
             <span className="badge badge-cyan">
               {phaseMode === 'linear'
-                ? '2049-Tap Zero-Phase Linear FIR (0.0° Phase)'
-                : '64-Bit Minimum-Phase RBJ IIR'}
+                ? '2049-Tap Zero-Phase Linear FIR + Live <3ms Preview'
+                : '64-Bit Minimum-Phase RBJ IIR + Live <3ms Preview'}
             </span>
           </div>
 
@@ -112,7 +111,6 @@ export const EqModule: React.FC<Props> = ({
           </div>
         </div>
 
-        {/* Composite Transfer Function + Dynamic Stabilizer Suppression Trace */}
         <div
           style={{
             background: '#05070b',
@@ -234,7 +232,7 @@ export const EqModule: React.FC<Props> = ({
               {band.type !== 'highpass' && (
                 <>
                   <div className="param-row">
-                    <span>Gain</span>
+                    <span>Static Gain</span>
                     <span className="param-val">
                       {band.gainDb >= 0 ? '+' : ''}
                       {band.gainDb.toFixed(1)} dB
@@ -263,12 +261,80 @@ export const EqModule: React.FC<Props> = ({
                 value={band.q}
                 onChange={(e) => onUpdateBand(idx, { q: Number(e.target.value) })}
               />
+
+              {band.type !== 'highpass' && (
+                <div
+                  style={{
+                    marginTop: 6,
+                    paddingTop: 6,
+                    borderTop: '1px solid var(--border)',
+                  }}
+                >
+                  <div className="param-row">
+                    <label
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        fontSize: 10.5,
+                        color: band.dynEnabled ? '#f59e0b' : 'var(--text-2)',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={Boolean(band.dynEnabled)}
+                        onChange={(e) =>
+                          onUpdateBand(idx, {
+                            dynEnabled: e.target.checked,
+                            dynThresholdDb: band.dynThresholdDb ?? -22,
+                            dynRangeDb: band.dynRangeDb ?? -3.0,
+                          })
+                        }
+                      />
+                      Pro-Q Dynamic Band
+                    </label>
+                    {band.dynEnabled && (
+                      <span className="param-val" style={{ color: '#f59e0b', fontSize: 10.5 }}>
+                        {(band.dynRangeDb ?? -3) >= 0 ? '+' : ''}
+                        {(band.dynRangeDb ?? -3).toFixed(1)} dB @ {band.dynThresholdDb ?? -22} dB
+                      </span>
+                    )}
+                  </div>
+                  {band.dynEnabled && (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                      <input
+                        type="range"
+                        title="Dynamic Range (-12 dB cut to +8 dB transient expand)"
+                        min={-12}
+                        max={8}
+                        step={0.5}
+                        value={band.dynRangeDb ?? -3}
+                        onChange={(e) =>
+                          onUpdateBand(idx, { dynRangeDb: Number(e.target.value) })
+                        }
+                      />
+                      <input
+                        type="range"
+                        title="Dynamic Sidechain Threshold (dBFS)"
+                        min={-42}
+                        max={-4}
+                        step={1}
+                        value={band.dynThresholdDb ?? -22}
+                        onChange={(e) =>
+                          onUpdateBand(idx, { dynThresholdDb: Number(e.target.value) })
+                        }
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           ))}
         </div>
       </div>
 
-      {/* Dynamic Spectral Resonance Suppressor (Ozone Stabilizer / Soothe2 Style) */}
+      {/* Dynamic Spectral Resonance Suppressor */}
       <div className="panel">
         <div className="panel-header">
           <div className="panel-title">

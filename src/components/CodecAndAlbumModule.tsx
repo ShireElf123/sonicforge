@@ -50,7 +50,6 @@ export const CodecAndAlbumModule: React.FC<Props> = ({
     try {
       const t1 = generateStudioSession('neon_horizon_mix', 48000, 2).stereoMix;
       const t2Raw = generateStudioSession('velvet_indie_mix', 48000, 2).stereoMix;
-      // Make Track 2 a naturally softer -3.2 dB intimate interlude
       const t2: PlanarAudioBuffer = {
         sampleRate: t2Raw.sampleRate,
         duration: t2Raw.duration,
@@ -130,7 +129,6 @@ export const CodecAndAlbumModule: React.FC<Props> = ({
         const item = albumTracks[idx];
         setBatchStatus(`Mastering track ${idx + 1}/${albumTracks.length}: "${item.name}"...`);
 
-        // In Relative Album Dynamics mode, preserve natural inter-track offset up to 5.0 LU below anchor
         const naturalOffset =
           albumMode === 'preserve_relative' && Number.isFinite(item.sourceLufs)
             ? Math.max(-5.0, Math.min(0, item.sourceLufs - loudestSrcLufs))
@@ -218,12 +216,11 @@ export const CodecAndAlbumModule: React.FC<Props> = ({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {/* Lossy Codec Headroom & Artifact Audition Simulator */}
       <div className="panel">
         <div className="panel-header">
           <div className="panel-title">
-            <span>Lossy Codec True-Peak Overshoot &amp; Artifact Audition</span>
-            <span className="badge badge-cyan">Ozone / Streamliner Codec Check</span>
+            <span>Hardware WebCodecs Bitstream &amp; 24-Bark Psychoacoustic Codec Audit</span>
+            <span className="badge badge-cyan">Native AAC/Opus WebCodecs + Zwicker Masking</span>
           </div>
         </div>
 
@@ -231,12 +228,13 @@ export const CodecAndAlbumModule: React.FC<Props> = ({
           <table className="benchmark-table">
             <thead>
               <tr>
-                <th>Simulated Delivery Codec</th>
+                <th>Delivery Codec</th>
+                <th>Codec Engine</th>
                 <th>Bandwidth</th>
                 <th>Pre-Codec TP</th>
                 <th>Post-Codec TP</th>
                 <th>ISP Overshoot</th>
-                <th>Codec SNR</th>
+                <th>Audible SNR</th>
                 <th>Status</th>
                 <th>Live Audition</th>
               </tr>
@@ -245,9 +243,15 @@ export const CodecAndAlbumModule: React.FC<Props> = ({
               {codecAudits.map((c) => {
                 const isPrev = activeCodecId === c.id && auditionMode === 'codec_preview';
                 const isDelta = activeCodecId === c.id && auditionMode === 'codec_delta';
+                const isHw = c.engineType === 'webcodecs_hardware';
                 return (
                   <tr key={c.id}>
                     <td style={{ fontWeight: 600 }}>{c.label}</td>
+                    <td>
+                      <span className={`badge ${isHw ? 'badge-emerald' : 'badge-cyan'}`}>
+                        {isHw ? 'Native WebCodecs' : '24-Bark MDCT'}
+                      </span>
+                    </td>
                     <td className="num">{(c.cutoffHz / 1000).toFixed(1)} kHz</td>
                     <td className="num">{c.preTruePeakDbtp.toFixed(2)} dBTP</td>
                     <td

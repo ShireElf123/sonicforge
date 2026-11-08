@@ -2,6 +2,8 @@ import React from 'react';
 import type {
   ExportFormatParams,
   LimiterParams,
+  SoftClipCurveMode,
+  TruePeakOversampling,
   WavMetadata,
   WavVerificationReport,
 } from '../dsp/types';
@@ -43,9 +45,9 @@ export const LimiterExportModule: React.FC<Props> = ({
       <div className="panel">
         <div className="panel-header">
           <div className="panel-title">
-            <span>IRC-V Transient/Sustain Split Oversampled True-Peak Maximizer</span>
+            <span>IRC-IV/V Spectral &amp; Soft-Clip True-Peak Maximizer</span>
             <span className="badge badge-cyan">
-              {limiter.oversampling}x Polyphase Kaiser-Sinc Sidechain
+              {limiter.oversampling}x Polyphase Kaiser-Sinc ({limiter.oversampling * 12}-Tap FIR)
             </span>
           </div>
           <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -93,7 +95,7 @@ export const LimiterExportModule: React.FC<Props> = ({
             <input
               type="range"
               min={-26}
-              max={-6}
+              max={-5}
               step={0.5}
               disabled={!limiter.autoGainToTarget}
               value={limiter.targetLufs}
@@ -109,7 +111,7 @@ export const LimiterExportModule: React.FC<Props> = ({
             <input
               type="range"
               min={3}
-              max={18}
+              max={20}
               step={0.5}
               disabled={!limiter.autoGainToTarget}
               value={limiter.maxAutoDriveDb}
@@ -169,6 +171,7 @@ export const LimiterExportModule: React.FC<Props> = ({
                   })
                 }
               >
+                <option value="irc_spectral">IRC-IV Spectral Subband + Transient</option>
                 <option value="irc_transient">IRC-V Transient/Sustain Split</option>
                 <option value="transparent">IRC Transparent Dual-Release</option>
                 <option value="punchy">Modern Punch Fast Recovery</option>
@@ -208,12 +211,13 @@ export const LimiterExportModule: React.FC<Props> = ({
                   onChange={(e) =>
                     onChangeLimiter({
                       ...limiter,
-                      oversampling: Number(e.target.value) as 4 | 8,
+                      oversampling: Number(e.target.value) as TruePeakOversampling,
                     })
                   }
                 >
                   <option value={4}>4x ITU</option>
                   <option value={8}>8x Ultra</option>
+                  <option value={16}>16x Mastering</option>
                 </select>
               </div>
             </div>
@@ -225,6 +229,89 @@ export const LimiterExportModule: React.FC<Props> = ({
               value={limiter.lookaheadMs}
               onChange={(e) =>
                 onChangeLimiter({ ...limiter, lookaheadMs: Number(e.target.value) })
+              }
+            />
+          </div>
+
+          {/* 4x Polyphase Oversampled Mastering Soft Clipper Stage */}
+          <div className={`param-card ${!limiter.softClipEnabled ? 'disabled' : ''}`}>
+            <div className="param-row">
+              <label
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 5,
+                  color: 'var(--text-0)',
+                  fontWeight: 700,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={Boolean(limiter.softClipEnabled)}
+                  onChange={(e) =>
+                    onChangeLimiter({
+                      ...limiter,
+                      softClipEnabled: e.target.checked,
+                      softClipMode: limiter.softClipMode ?? 'crisp_cubic',
+                      softClipThresholdDb: limiter.softClipThresholdDb ?? -1.8,
+                      softClipAmountPct: limiter.softClipAmountPct ?? 45,
+                    })
+                  }
+                />
+                4x Oversampled Soft Clipper
+              </label>
+              <select
+                className="select-input"
+                style={{ padding: '2px 5px', fontSize: 10.5 }}
+                value={limiter.softClipMode ?? 'crisp_cubic'}
+                onChange={(e) =>
+                  onChangeLimiter({
+                    ...limiter,
+                    softClipMode: e.target.value as SoftClipCurveMode,
+                  })
+                }
+              >
+                <option value="crisp_cubic">Crisp Cubic (StandardCLIP)</option>
+                <option value="warm_tanh">Warm Analog Tanh</option>
+                <option value="diode_even">Asymmetric Diode</option>
+              </select>
+            </div>
+
+            <div className="param-row">
+              <span>Knee Onset Below Ceiling</span>
+              <span className="param-val">{(limiter.softClipThresholdDb ?? -1.8).toFixed(1)} dB</span>
+            </div>
+            <input
+              type="range"
+              min={-4.5}
+              max={-0.3}
+              step={0.1}
+              disabled={!limiter.softClipEnabled}
+              value={limiter.softClipThresholdDb ?? -1.8}
+              onChange={(e) =>
+                onChangeLimiter({
+                  ...limiter,
+                  softClipThresholdDb: Number(e.target.value),
+                })
+              }
+            />
+
+            <div className="param-row">
+              <span>Pre-Limiter Clip Blend</span>
+              <span className="param-val">{limiter.softClipAmountPct ?? 45}%</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={5}
+              disabled={!limiter.softClipEnabled}
+              value={limiter.softClipAmountPct ?? 45}
+              onChange={(e) =>
+                onChangeLimiter({
+                  ...limiter,
+                  softClipAmountPct: Number(e.target.value),
+                })
               }
             />
           </div>

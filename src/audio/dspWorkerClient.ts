@@ -71,7 +71,7 @@ class DspWorkerClient {
   async analyze(
     buffer: PlanarAudioBuffer,
     ceilingDbtp = -1.0,
-    oversampling: 4 | 8 = 4
+    oversampling: 4 | 8 | 16 = 4
   ): Promise<AudioAnalysisReport> {
     const w = this.ensureWorker();
     if (!w) {

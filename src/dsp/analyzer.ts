@@ -6,10 +6,10 @@ import {
   measureStereoField,
 } from './spectral';
 import { measureTruePeak } from './truePeak';
-import type { AudioAnalysisReport, PlanarAudioBuffer } from './types';
+import type { AudioAnalysisReport, PlanarAudioBuffer, TruePeakOversampling } from './types';
 
 export interface AnalyzeOptions {
-  oversamplingFactor?: 4 | 8;
+  oversamplingFactor?: TruePeakOversampling;
   ceilingDbtp?: number;
   waveformBuckets?: number;
   grTimelineDb?: number[];

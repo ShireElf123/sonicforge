@@ -4,6 +4,8 @@ export interface PlanarAudioBuffer {
   duration: number;
 }
 
+export type TruePeakOversampling = 4 | 8 | 16;
+
 export type DeliveryProfileId =
   | 'spotify'
   | 'apple_music'
@@ -43,7 +45,7 @@ export interface TruePeakMetrics {
   samplePeakDbfs: number;
   samplePeakPerChannelDbfs: number[];
   ispMarginDb: number;
-  oversamplingFactor: 4 | 8;
+  oversamplingFactor: TruePeakOversampling;
   clippedSampleCount: number;
   truePeakOverZeroCount: number;
   ceilingViolationCount: number;
@@ -123,6 +125,10 @@ export interface EqBandParams {
   gainDb: number;
   q: number;
   placement: EqPlacement;
+  /** Pro-Q 4 style per-band dynamic EQ (compress < 0 dB or upward expand > 0 dB) */
+  dynEnabled?: boolean;
+  dynThresholdDb?: number;
+  dynRangeDb?: number;
 }
 
 export interface StabilizerParams {
@@ -175,7 +181,14 @@ export interface ExciterParams {
   mixPct: number;
 }
 
-export type LimiterReleaseMode = 'transparent' | 'irc_transient' | 'punchy' | 'dynamic';
+export type LimiterReleaseMode =
+  | 'transparent'
+  | 'irc_transient'
+  | 'irc_spectral'
+  | 'punchy'
+  | 'dynamic';
+
+export type SoftClipCurveMode = 'crisp_cubic' | 'warm_tanh' | 'diode_even';
 
 export interface LimiterParams {
   enabled: boolean;
@@ -187,7 +200,12 @@ export interface LimiterParams {
   lookaheadMs: number;
   releaseMode: LimiterReleaseMode;
   transientEmphasisPct: number;
-  oversampling: 4 | 8;
+  oversampling: TruePeakOversampling;
+  /** 4x Polyphase Oversampled Pre-Limiter Mastering Soft Clipper (StandardCLIP / KClip style) */
+  softClipEnabled?: boolean;
+  softClipMode?: SoftClipCurveMode;
+  softClipThresholdDb?: number;
+  softClipAmountPct?: number;
 }
 
 export interface WavMetadata {
@@ -277,4 +295,5 @@ export interface CodecAuditResult {
   ispOvershootDb: number;
   artifactSnrDb: number;
   clipsZeroDbtp: boolean;
+  engineType?: 'webcodecs_hardware' | 'psychoacoustic_24bark';
 }

@@ -19,7 +19,7 @@ export type WorkerRequest =
       type: 'analyze';
       buffer: PlanarAudioBuffer;
       ceilingDbtp: number;
-      oversampling: 4 | 8;
+      oversampling: 4 | 8 | 16;
     }
   | {
       id: number;

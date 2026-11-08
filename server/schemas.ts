@@ -73,6 +73,7 @@ const CodecAuditSchema = z
     ispOvershootDb: z.number().min(0).max(24),
     artifactSnrDb: z.number().min(0).max(140),
     clipsZeroDbtp: z.boolean(),
+    engineType: z.enum(['webcodecs_hardware', 'psychoacoustic_24bark']).optional(),
   })
   .strict();
 

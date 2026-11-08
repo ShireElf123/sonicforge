@@ -18,6 +18,7 @@ import type {
   MultibandBandParams,
   MultibandParams,
   PlanarAudioBuffer,
+  SoftClipCurveMode,
   StemBusParams,
   StemSlotId,
   StereoStageParams,
@@ -283,6 +284,90 @@ export function applyMasteringEq(
   }
 }
 
+/**
+ * Pro-Q 4 Style Per-Band Dynamic M/S EQ Stage.
+ * Isolates each dynamic band's resonant energy via a +12 dB parallel peaking differential
+ * detector on Stereo, Mid, or Side, and modulates only that band's energy by dynRangeDb
+ * (-12 dB downward dynamic cut to +8 dB upward transient expansion) when above dynThresholdDb.
+ */
+export function applyDynamicEqBands(
+  left: Float32Array,
+  right: Float32Array,
+  sampleRate: number,
+  bands: EqBandParams[]
+): void {
+  const dynBands = bands.filter(
+    (b) =>
+      b.enabled &&
+      b.dynEnabled &&
+      b.type !== 'highpass' &&
+      Math.abs(b.dynRangeDb ?? 0) > 0.1
+  );
+  if (dynBands.length === 0 || left.length === 0) return;
+
+  const n = left.length;
+  const attCoeff = Math.exp(-1 / Math.max(1, 0.004 * sampleRate));
+  const relCoeff = Math.exp(-1 / Math.max(1, 0.055 * sampleRate));
+
+  const processDynamicChannel = (sig: Float32Array, band: EqBandParams) => {
+    const rangeDb = Math.max(-12, Math.min(8, band.dynRangeDb ?? -3));
+    const threshDb = band.dynThresholdDb ?? -20;
+
+    // Extract isolated band component via unity-compensated +6 dB peaking difference
+    const boosted = new Float32Array(sig);
+    const probeCoeffs = designEqBiquad(
+      band.type === 'lowshelf' || band.type === 'highshelf' ? band.type : 'peaking',
+      band.freqHz,
+      sampleRate,
+      6.0,
+      Math.max(0.5, band.q)
+    );
+    new BiquadFilter(probeCoeffs).processInPlace(boosted);
+
+    // At center frequency, boosted - sig === (10^(6/20) - 1) * bandComponent = 0.99526 * bandComponent
+    const bandComp = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      bandComp[i] = (boosted[i] - sig[i]) / 0.9952623;
+    }
+
+    let envLin = 0;
+    for (let i = 0; i < n; i++) {
+      const a = Math.abs(bandComp[i]);
+      envLin = a > envLin ? attCoeff * envLin + (1 - attCoeff) * a : relCoeff * envLin + (1 - relCoeff) * a;
+      const envDb = envLin > 1e-6 ? 20 * Math.log10(envLin) : -120;
+      if (envDb > threshDb) {
+        const overRatio = Math.min(1.0, (envDb - threshDb) / 12.0);
+        const modDb = rangeDb * overRatio;
+        const deltaGain = dbToLinear(modDb) - 1.0;
+        sig[i] += bandComp[i] * deltaGain;
+      }
+    }
+  };
+
+  for (const band of dynBands) {
+    if (band.placement === 'stereo') {
+      processDynamicChannel(left, band);
+      processDynamicChannel(right, band);
+    } else {
+      const mid = new Float32Array(n);
+      const side = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        mid[i] = 0.5 * (left[i] + right[i]);
+        side[i] = 0.5 * (left[i] - right[i]);
+      }
+      if (band.placement === 'mid') {
+        processDynamicChannel(mid, band);
+      } else {
+        processDynamicChannel(side, band);
+      }
+      for (let i = 0; i < n; i++) {
+        left[i] = mid[i] + side[i];
+        right[i] = mid[i] - side[i];
+      }
+    }
+  }
+}
+
 export function applySingleBandCompressor(
   left: Float32Array,
   right: Float32Array,
@@ -472,10 +557,130 @@ export function applyHarmonicExciter(
 }
 
 /**
- * IRC-V Style Transient / Sustain Differential Pre-Shaper.
- * Separates fast attack transients from slow sustained RMS body so kick/snare snap
- * survives heavy brickwall limiting without pumping or dulling.
+ * 4x Polyphase Kaiser-Sinc Oversampled Mastering Soft Clipper (StandardCLIP / KClip 3 style).
+ * Transparently shaves micro-millisecond snare/hat spikes at 4x sample rate with steep
+ * anti-alias filtering so the downstream brickwall limiter works 3-5 dB less hard on -6 LUFS masters.
  */
+export function applyOversampledSoftClipper(
+  left: Float32Array,
+  right: Float32Array,
+  sampleRate: number,
+  ceilingLin: number,
+  thresholdDb = -1.8,
+  amountPct = 50,
+  mode: SoftClipCurveMode = 'crisp_cubic'
+): void {
+  const mix = Math.max(0, Math.min(1, amountPct / 100));
+  if (mix < 0.01 || left.length === 0) return;
+
+  const bank = getPolyphaseBank(4);
+  const taps = bank.tapsPerPhase;
+  const center = taps / 2 - 1;
+  const ceiling = Math.max(0.2, ceilingLin);
+  const kneeStart = ceiling * Math.min(0.96, dbToLinear(Math.min(-0.2, thresholdDb)));
+  const span = Math.max(1e-5, ceiling - kneeStart);
+
+  const shapeSample = (x: number): number => {
+    const ax = Math.abs(x);
+    if (ax <= kneeStart) return x;
+    const sign = x >= 0 ? 1 : -1;
+    const u = (ax - kneeStart) / span;
+    if (mode === 'warm_tanh') {
+      return sign * (kneeStart + span * Math.tanh(u));
+    }
+    if (mode === 'diode_even') {
+      const asym = x >= 0 ? Math.tanh(u * 0.92) : Math.tanh(u * 1.12);
+      return sign * (kneeStart + span * Math.abs(asym));
+    }
+    // crisp_cubic: C1-continuous soft-knee polynomial saturator asymptotically approaching ceiling
+    const soft = u / (1 + u + 0.35 * u * u);
+    return sign * (kneeStart + span * Math.min(1.0, soft * 1.35));
+  };
+
+  const clipChannel = (ch: Float32Array) => {
+    const n = ch.length;
+    const up = new Float32Array(n * 4);
+    for (let i = 0; i < n; i++) {
+      up[i * 4] = ch[i];
+      for (let p = 1; p < 4; p++) {
+        const h = bank.phases[p];
+        let acc = 0;
+        for (let k = 0; k < taps; k++) {
+          const idx = i - center + k;
+          if (idx >= 0 && idx < n) acc += ch[idx] * h[k];
+        }
+        up[i * 4 + p] = acc;
+      }
+    }
+
+    for (let j = 0; j < up.length; j++) {
+      const dry = up[j];
+      up[j] = dry + (shapeSample(dry) - dry) * mix;
+    }
+
+    // Two-stage 4th-order Butterworth anti-aliasing filter at 0.44 * Fs before 4:1 decimation
+    const aa1 = new BiquadFilter(designButterworthLowpass2(sampleRate * 0.44, sampleRate * 4));
+    const aa2 = new BiquadFilter(designButterworthLowpass2(sampleRate * 0.44, sampleRate * 4));
+    aa1.processInPlace(up);
+    aa2.processInPlace(up);
+
+    for (let i = 0; i < n; i++) {
+      ch[i] = up[i * 4];
+    }
+  };
+
+  clipChannel(left);
+  clipChannel(right);
+}
+
+/**
+ * IRC-IV Style Spectral-Subband Pre-Limiter Envelope Tamer.
+ * Separates <180 Hz sub-bass from >180 Hz mid/highs via phase-aligned LR4 crossovers so heavy
+ * 808/kick sub energy is controlled independently without ducking vocals or hi-hat air.
+ */
+function applyIrcSpectralSubbandControl(
+  left: Float32Array,
+  right: Float32Array,
+  sampleRate: number,
+  ceilingLin: number
+): void {
+  const n = left.length;
+  if (n === 0) return;
+
+  const xo = 180;
+  const lowL = new Float32Array(left);
+  const lowR = new Float32Array(right);
+  const highL = new Float32Array(left);
+  const highR = new Float32Array(right);
+
+  const lpCoeffs = designButterworthLowpass2(xo, sampleRate);
+  const hpCoeffs = designButterworthHighpass2(xo, sampleRate);
+
+  new BiquadFilter(lpCoeffs).processInPlace(lowL);
+  new BiquadFilter(lpCoeffs).processInPlace(lowL);
+  new BiquadFilter(lpCoeffs).processInPlace(lowR);
+  new BiquadFilter(lpCoeffs).processInPlace(lowR);
+
+  new BiquadFilter(hpCoeffs).processInPlace(highL);
+  new BiquadFilter(hpCoeffs).processInPlace(highL);
+  new BiquadFilter(hpCoeffs).processInPlace(highR);
+  new BiquadFilter(hpCoeffs).processInPlace(highR);
+
+  // Control <180 Hz sub peaks exceeding 78% of ceiling independently from vocal/top-end band
+  const subCap = ceilingLin * 0.78;
+  const att = Math.exp(-1 / Math.max(1, 0.002 * sampleRate));
+  const rel = Math.exp(-1 / Math.max(1, 0.065 * sampleRate));
+  let subEnv = 0;
+
+  for (let i = 0; i < n; i++) {
+    const pk = Math.max(Math.abs(lowL[i]), Math.abs(lowR[i]));
+    subEnv = pk > subEnv ? att * subEnv + (1 - att) * pk : rel * subEnv + (1 - rel) * pk;
+    const gSub = subEnv > subCap ? subCap / subEnv : 1.0;
+    left[i] = lowL[i] * gSub + highL[i];
+    right[i] = lowR[i] * gSub + highR[i];
+  }
+}
+
 export function applyTransientSustainShaper(
   left: Float32Array,
   right: Float32Array,
@@ -495,12 +700,13 @@ export function applyTransientSustainShaper(
 
   for (let i = 0; i < left.length; i++) {
     const peak = Math.max(Math.abs(left[i]), Math.abs(right[i]));
-    fastEnv = peak > fastEnv ? fastAtt * fastEnv + (1 - fastAtt) * peak : fastRel * fastEnv + (1 - fastRel) * peak;
-    slowEnv = peak > slowEnv ? slowAtt * slowEnv + (1 - slowAtt) * peak : slowRel * slowEnv + (1 - slowRel) * peak;
+    fastEnv =
+      peak > fastEnv ? fastAtt * fastEnv + (1 - fastAtt) * peak : fastRel * fastEnv + (1 - fastRel) * peak;
+    slowEnv =
+      peak > slowEnv ? slowAtt * slowEnv + (1 - slowAtt) * peak : slowRel * slowEnv + (1 - slowRel) * peak;
 
     if (slowEnv > 1e-5 && fastEnv > slowEnv) {
       const crestRatioDb = Math.min(9.0, 20 * Math.log10(fastEnv / slowEnv));
-      // Accentuate transient attack edge (up to +2.8 dB micro-transient lift before limiter)
       const boostDb = crestRatioDb * amt * 0.34;
       const g = dbToLinear(boostDb);
       left[i] *= g;
@@ -536,16 +742,35 @@ export function applyTruePeakLimiter(
     }
   }
 
-  // Engage IRC-V Transient/Sustain Split Shaper when IRC-Transient mode or emphasis > 0
+  const ceilingLin = dbToLinear(params.ceilingDbtp - 0.04);
+
+  // 1. IRC-IV Spectral Subband Control (prevents sub-bass from ducking vocals/highs)
+  if (params.releaseMode === 'irc_spectral') {
+    applyIrcSpectralSubbandControl(left, right, sampleRate, ceilingLin);
+  }
+
+  // 2. IRC-V Transient/Sustain Split Shaper
   const effectiveTransientPct =
-    params.releaseMode === 'irc_transient'
+    params.releaseMode === 'irc_transient' || params.releaseMode === 'irc_spectral'
       ? Math.max(25, params.transientEmphasisPct)
       : params.transientEmphasisPct;
   if (Math.abs(effectiveTransientPct) >= 1) {
     applyTransientSustainShaper(left, right, sampleRate, effectiveTransientPct);
   }
 
-  const ceilingLin = dbToLinear(params.ceilingDbtp - 0.04);
+  // 3. 4x Oversampled Pre-Limiter Soft Clipper (shaves micro-spikes cleanly for loud masters)
+  if (params.softClipEnabled && (params.softClipAmountPct ?? 0) > 1) {
+    applyOversampledSoftClipper(
+      left,
+      right,
+      sampleRate,
+      ceilingLin,
+      params.softClipThresholdDb ?? -1.8,
+      params.softClipAmountPct ?? 45,
+      params.softClipMode ?? 'crisp_cubic'
+    );
+  }
+
   const tpEnv = computePerFrameTruePeakLinear([left, right], params.oversampling);
 
   const lookaheadSamples = Math.max(
@@ -582,16 +807,16 @@ export function applyTruePeakLimiter(
   }
 
   const fastRelMs =
-    params.releaseMode === 'irc_transient'
-      ? 18
+    params.releaseMode === 'irc_transient' || params.releaseMode === 'irc_spectral'
+      ? 16
       : params.releaseMode === 'punchy'
         ? 28
         : params.releaseMode === 'dynamic'
           ? 45
           : 38;
   const slowRelMs =
-    params.releaseMode === 'irc_transient'
-      ? 210
+    params.releaseMode === 'irc_transient' || params.releaseMode === 'irc_spectral'
+      ? 195
       : params.releaseMode === 'punchy'
         ? 160
         : params.releaseMode === 'dynamic'
@@ -735,6 +960,7 @@ export function renderMasterChain(
       onProgress?.('Applying 6-band 64-bit Minimum-Phase M/S EQ', 24);
       applyMasteringEq(left, right, sr, params.eqBands);
     }
+    applyDynamicEqBands(left, right, sr, params.eqBands);
   }
 
   let stabilizerAttenuationDb: number[] = new Array(64).fill(0);

@@ -1,4 +1,4 @@
-import type { PlanarAudioBuffer } from '../dsp/types';
+import type { MasteringChainParams, PlanarAudioBuffer } from '../dsp/types';
 
 export type AuditionMode =
   | 'master'
@@ -28,6 +28,25 @@ function ampToDb(amp: number): number {
   return amp > 1e-6 ? 20 * Math.log10(amp) : -96;
 }
 
+function buildSafetySoftClipCurve(ceilingLin: number): Float32Array<ArrayBuffer> {
+  const N = 8193;
+  const curve = new Float32Array(new ArrayBuffer(N * 4));
+  const c = Math.max(0.25, Math.min(1.0, ceilingLin));
+  const knee = c * 0.88;
+  const span = Math.max(1e-4, c - knee);
+  for (let i = 0; i < N; i++) {
+    const x = ((i / (N - 1)) * 2 - 1) * 2.0; // domain [-2, +2] via 0.5x pre-scale
+    const ax = Math.abs(x);
+    if (ax <= knee) {
+      curve[i] = x;
+    } else {
+      const s = x >= 0 ? 1 : -1;
+      curve[i] = s * (knee + span * Math.tanh((ax - knee) / span));
+    }
+  }
+  return curve;
+}
+
 export class StudioPlaybackEngine {
   private ctx: AudioContext | null = null;
   private sourceAudioBuf: AudioBuffer | null = null;
@@ -44,6 +63,23 @@ export class StudioPlaybackEngine {
   private mstGain: GainNode | null = null;
   private refGain: GainNode | null = null;
   private codecGain: GainNode | null = null;
+
+  // Zero-latency (<3 ms) incremental M/S live knob-drag preview nodes on the Master path
+  private liveTrimGain: GainNode | null = null;
+  private liveSplit: ChannelSplitterNode | null = null;
+  private liveMidSumL: GainNode | null = null;
+  private liveMidSumR: GainNode | null = null;
+  private liveSideSumL: GainNode | null = null;
+  private liveSideSumR: GainNode | null = null;
+  private liveMidEq: BiquadFilterNode[] = [];
+  private liveSideEq: BiquadFilterNode[] = [];
+  private liveSideWidth: GainNode | null = null;
+  private liveOutL: GainNode | null = null;
+  private liveOutR: GainNode | null = null;
+  private liveSideInvR: GainNode | null = null;
+  private liveMerge: ChannelMergerNode | null = null;
+  private liveSafetyPreGain: GainNode | null = null;
+  private liveSafetyShaper: WaveShaperNode | null = null;
 
   private preMatrixBus: GainNode | null = null;
   private splitter: ChannelSplitterNode | null = null;
@@ -97,6 +133,80 @@ export class StudioPlaybackEngine {
     this.codecGain = ctx.createGain();
     this.preMatrixBus = ctx.createGain();
 
+    // Build zero-latency incremental M/S live preview chain on Master bus
+    this.liveTrimGain = ctx.createGain();
+    this.liveSplit = ctx.createChannelSplitter(2);
+    this.liveMidSumL = ctx.createGain();
+    this.liveMidSumR = ctx.createGain();
+    this.liveSideSumL = ctx.createGain();
+    this.liveSideSumR = ctx.createGain();
+    this.liveMidSumL.gain.value = 0.5;
+    this.liveMidSumR.gain.value = 0.5;
+    this.liveSideSumL.gain.value = 0.5;
+    this.liveSideSumR.gain.value = -0.5;
+
+    this.liveMidEq = Array.from({ length: 6 }, () => {
+      const f = ctx.createBiquadFilter();
+      f.type = 'peaking';
+      f.frequency.value = 1000;
+      f.gain.value = 0;
+      return f;
+    });
+    this.liveSideEq = Array.from({ length: 6 }, () => {
+      const f = ctx.createBiquadFilter();
+      f.type = 'peaking';
+      f.frequency.value = 1000;
+      f.gain.value = 0;
+      return f;
+    });
+
+    for (let i = 0; i < 5; i++) {
+      this.liveMidEq[i].connect(this.liveMidEq[i + 1]);
+      this.liveSideEq[i].connect(this.liveSideEq[i + 1]);
+    }
+
+    this.liveSideWidth = ctx.createGain();
+    this.liveSideWidth.gain.value = 1.0;
+
+    this.liveOutL = ctx.createGain();
+    this.liveOutR = ctx.createGain();
+    this.liveSideInvR = ctx.createGain();
+    this.liveSideInvR.gain.value = -1.0;
+    this.liveMerge = ctx.createChannelMerger(2);
+
+    this.liveSafetyPreGain = ctx.createGain();
+    this.liveSafetyPreGain.gain.value = 0.5; // maps [-2, +2] into WaveShaper [-1, +1]
+    this.liveSafetyShaper = ctx.createWaveShaper();
+    this.liveSafetyShaper.oversample = '4x';
+    this.liveSafetyShaper.curve = buildSafetySoftClipCurve(0.891); // -1.0 dBTP default
+
+    // Wire mstNode -> liveTrimGain -> M/S Split -> 6x Mid/Side EQ -> Width -> M/S Decode -> 4x Safety Shaper -> mstGain
+    this.liveTrimGain.connect(this.liveSplit);
+    this.liveSplit.connect(this.liveMidSumL, 0);
+    this.liveSplit.connect(this.liveMidSumR, 1);
+    this.liveSplit.connect(this.liveSideSumL, 0);
+    this.liveSplit.connect(this.liveSideSumR, 1);
+
+    this.liveMidSumL.connect(this.liveMidEq[0]);
+    this.liveMidSumR.connect(this.liveMidEq[0]);
+    this.liveSideSumL.connect(this.liveSideEq[0]);
+    this.liveSideSumR.connect(this.liveSideEq[0]);
+
+    this.liveSideEq[5].connect(this.liveSideWidth);
+
+    // L = Mid + Side, R = Mid - Side
+    this.liveMidEq[5].connect(this.liveOutL);
+    this.liveSideWidth.connect(this.liveOutL);
+    this.liveMidEq[5].connect(this.liveOutR);
+    this.liveSideWidth.connect(this.liveSideInvR);
+    this.liveSideInvR.connect(this.liveOutR);
+
+    this.liveOutL.connect(this.liveMerge, 0, 0);
+    this.liveOutR.connect(this.liveMerge, 0, 1);
+    this.liveMerge.connect(this.liveSafetyPreGain);
+    this.liveSafetyPreGain.connect(this.liveSafetyShaper);
+    this.liveSafetyShaper.connect(this.mstGain);
+
     this.srcGain.connect(this.preMatrixBus);
     this.mstGain.connect(this.preMatrixBus);
     this.refGain.connect(this.preMatrixBus);
@@ -120,7 +230,6 @@ export class StudioPlaybackEngine {
     this.matLR.connect(this.merger, 0, 1);
     this.matRR.connect(this.merger, 0, 1);
 
-    // Acoustic device translation simulation chain
     this.vHpf = ctx.createBiquadFilter();
     this.vMid = ctx.createBiquadFilter();
     this.vLpf = ctx.createBiquadFilter();
@@ -147,6 +256,96 @@ export class StudioPlaybackEngine {
     this.applyVoicingFilters();
   }
 
+  /**
+   * Zero-latency (<3 ms) live knob-drag preview!
+   * Applies the exact differential EQ/Width/Gain change in Web Audio immediately while dragging
+   * sliders, before the background 64-bit Linear-Phase / 16x True-Peak Worker render completes.
+   */
+  applyLivePreviewDelta(
+    committed: MasteringChainParams | null,
+    live: MasteringChainParams
+  ): void {
+    if (!this.ctx || !committed || !this.liveTrimGain || !this.liveSideWidth) return;
+    const now = this.ctx.currentTime;
+    const tau = 0.004;
+
+    const deltaTrimDb =
+      live.inputGainDb -
+      committed.inputGainDb +
+      (live.limiter.manualDriveDb - committed.limiter.manualDriveDb) * 0.65;
+    const trimLin = Math.pow(10, Math.max(-12, Math.min(12, deltaTrimDb)) / 20);
+    this.liveTrimGain.gain.setTargetAtTime(trimLin, now, tau);
+
+    const commW = committed.stereo.enabled ? Math.max(15, committed.stereo.widthPct) : 100;
+    const liveW = live.stereo.enabled ? Math.max(0, live.stereo.widthPct) : 100;
+    this.liveSideWidth.gain.setTargetAtTime(Math.min(2.2, liveW / commW), now, tau);
+
+    if (this.liveSafetyShaper && Math.abs(live.limiter.ceilingDbtp - committed.limiter.ceilingDbtp) > 0.05) {
+      this.liveSafetyShaper.curve = buildSafetySoftClipCurve(
+        Math.pow(10, live.limiter.ceilingDbtp / 20)
+      );
+    }
+
+    for (let i = 0; i < Math.min(6, live.eqBands.length); i++) {
+      const lb = live.eqBands[i];
+      const cb = committed.eqBands[i];
+      const mNode = this.liveMidEq[i];
+      const sNode = this.liveSideEq[i];
+      if (!lb || !cb || !mNode || !sNode) continue;
+
+      if (lb.type === 'highpass') {
+        mNode.type = 'peaking';
+        sNode.type = 'peaking';
+        mNode.gain.setTargetAtTime(0, now, tau);
+        sNode.gain.setTargetAtTime(0, now, tau);
+        continue;
+      }
+
+      const bType: BiquadFilterType =
+        lb.type === 'lowshelf' ? 'lowshelf' : lb.type === 'highshelf' ? 'highshelf' : 'peaking';
+      mNode.type = bType;
+      sNode.type = bType;
+      mNode.frequency.setTargetAtTime(lb.freqHz, now, tau);
+      sNode.frequency.setTargetAtTime(lb.freqHz, now, tau);
+      mNode.Q.setTargetAtTime(lb.q, now, tau);
+      sNode.Q.setTargetAtTime(lb.q, now, tau);
+
+      const commMidGain =
+        committed.eqEnabled && cb.enabled && (cb.placement === 'stereo' || cb.placement === 'mid')
+          ? cb.gainDb
+          : 0;
+      const commSideGain =
+        committed.eqEnabled && cb.enabled && (cb.placement === 'stereo' || cb.placement === 'side')
+          ? cb.gainDb
+          : 0;
+      const liveMidGain =
+        live.eqEnabled && lb.enabled && (lb.placement === 'stereo' || lb.placement === 'mid')
+          ? lb.gainDb
+          : 0;
+      const liveSideGain =
+        live.eqEnabled && lb.enabled && (lb.placement === 'stereo' || lb.placement === 'side')
+          ? lb.gainDb
+          : 0;
+
+      mNode.gain.setTargetAtTime(liveMidGain - commMidGain, now, tau);
+      sNode.gain.setTargetAtTime(liveSideGain - commSideGain, now, tau);
+    }
+  }
+
+  resetLivePreviewDelta(ceilingDbtp = -1.0): void {
+    if (!this.ctx || !this.liveTrimGain || !this.liveSideWidth) return;
+    const now = this.ctx.currentTime;
+    this.liveTrimGain.gain.setValueAtTime(1.0, now);
+    this.liveSideWidth.gain.setValueAtTime(1.0, now);
+    for (let i = 0; i < this.liveMidEq.length; i++) {
+      this.liveMidEq[i].gain.setValueAtTime(0, now);
+      this.liveSideEq[i].gain.setValueAtTime(0, now);
+    }
+    if (this.liveSafetyShaper) {
+      this.liveSafetyShaper.curve = buildSafetySoftClipCurve(Math.pow(10, ceilingDbtp / 20));
+    }
+  }
+
   private planarToAudioBuffer(planar: PlanarAudioBuffer): AudioBuffer {
     const ctx = this.ensureContext();
     const numCh = Math.max(2, planar.channels.length);
@@ -169,13 +368,17 @@ export class StudioPlaybackEngine {
     masterLufs: number,
     reference?: PlanarAudioBuffer | null,
     referenceLufs?: number,
-    codecPreview?: PlanarAudioBuffer | null
+    codecPreview?: PlanarAudioBuffer | null,
+    ceilingDbtp = -1.0
   ): void {
     const wasPlaying = this.isPlayingState;
     const resumePos = this.getCurrentTimeSec();
     if (wasPlaying) {
       this.stopNodesOnly();
     }
+
+    // Reset live preview delta filters the exact instant the new 64-bit rendered master buffer swaps in
+    this.resetLivePreviewDelta(ceilingDbtp);
 
     this.sourceAudioBuf =
       source && source.channels[0]?.length ? this.planarToAudioBuffer(source) : null;
@@ -295,7 +498,6 @@ export class StudioPlaybackEngine {
         else mG = 1.0;
         break;
       case 'codec_delta':
-        // Hear ONLY the lossy codec quantization + bandwidth truncation artifacts!
         if (this.codecAudioBuf) {
           cG = 1.0;
           mG = -1.0;
@@ -316,7 +518,6 @@ export class StudioPlaybackEngine {
     const now = this.ctx.currentTime;
     const tau = immediate ? 0.001 : 0.01;
 
-    // Force mono fold-down when checking Phone or Auratone single-driver speakers!
     const forceMonoSpeaker =
       this.monitorVoicing === 'phone' || this.monitorVoicing === 'auratone';
     const mode = forceMonoSpeaker && this.monitorMode === 'stereo' ? 'mono' : this.monitorMode;
@@ -347,7 +548,6 @@ export class StudioPlaybackEngine {
   private applyVoicingFilters(): void {
     if (!this.ctx || !this.vHpf || !this.vMid || !this.vLpf || !this.vTrim) return;
 
-    // Reset neutral defaults
     this.vHpf.type = 'highpass';
     this.vMid.type = 'peaking';
     this.vLpf.type = 'lowpass';
@@ -384,7 +584,7 @@ export class StudioPlaybackEngine {
         break;
       case 'car':
         this.vHpf.frequency.value = 38;
-        this.vHpf.Q.value = 1.15; // Cabin resonance bump
+        this.vHpf.Q.value = 1.15;
         this.vMid.frequency.value = 420;
         this.vMid.Q.value = 1.2;
         this.vMid.gain.value = -2.8;
@@ -394,7 +594,7 @@ export class StudioPlaybackEngine {
         break;
       case 'club':
         this.vHpf.frequency.value = 32;
-        this.vHpf.Q.value = 1.35; // Horn sub resonance
+        this.vHpf.Q.value = 1.35;
         this.vMid.frequency.value = 68;
         this.vMid.Q.value = 1.1;
         this.vMid.gain.value = 4.5;
@@ -426,7 +626,7 @@ export class StudioPlaybackEngine {
 
     const makeSource = (
       buf: AudioBuffer | null,
-      dest: GainNode
+      dest: AudioNode
     ): AudioBufferSourceNode | null => {
       if (!buf) return null;
       const node = ctx.createBufferSource();
@@ -443,7 +643,8 @@ export class StudioPlaybackEngine {
     };
 
     this.srcNode = makeSource(this.sourceAudioBuf, this.srcGain!);
-    this.mstNode = makeSource(this.masterAudioBuf, this.mstGain!);
+    // Route mstNode through the <3 ms incremental M/S live preview chain -> mstGain
+    this.mstNode = makeSource(this.masterAudioBuf, this.liveTrimGain!);
     this.refNode = makeSource(this.refAudioBuf, this.refGain!);
     this.codecNode = makeSource(this.codecAudioBuf, this.codecGain!);
 

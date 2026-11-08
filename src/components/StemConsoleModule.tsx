@@ -1,4 +1,8 @@
-import React from 'react';
+import React, { useMemo } from 'react';
+import {
+  computeAutoUnmaskBusPatches,
+  detectStemMaskingCollisions,
+} from '../dsp/stemMasking';
 import type {
   AudioAnalysisReport,
   PlanarAudioBuffer,
@@ -16,6 +20,7 @@ interface Props {
   hasStereoSource: boolean;
   onUploadStem: (slot: StemSlotId, file: File) => void;
   onUpdateBus: (slot: StemSlotId, patch: Partial<StemBusParams>) => void;
+  onReplaceAllBuses?: (next: Record<StemSlotId, StemBusParams>) => void;
   onRenderStems: () => void;
   onDemixStereoToStems: () => void;
 }
@@ -32,14 +37,28 @@ export const StemConsoleModule: React.FC<Props> = ({
   hasStereoSource,
   onUploadStem,
   onUpdateBus,
+  onReplaceAllBuses,
   onRenderStems,
   onDemixStereoToStems,
 }) => {
+  const collisions = useMemo(() => detectStemMaskingCollisions(stemReports), [stemReports]);
+
+  const handleAutoUnmask = () => {
+    const patched = computeAutoUnmaskBusPatches(busParams, collisions);
+    if (onReplaceAllBuses) {
+      onReplaceAllBuses(patched);
+    } else {
+      for (const s of SLOTS) {
+        onUpdateBus(s, patched[s]);
+      }
+    }
+  };
+
   return (
     <div className="panel">
       <div className="panel-header">
         <div className="panel-title">
-          <span>4-Bus Multi-Stem Console &amp; Local HPSS+M/S Demixer</span>
+          <span>4-Bus Multi-Stem Console, REPET-SIM Demixer v2 &amp; Collision Unmasker</span>
           {demixNullDb !== null && (
             <span className="badge badge-emerald num">
               Partition-of-Unity Sum Null: {demixNullDb.toFixed(1)} dB
@@ -52,9 +71,9 @@ export const StemConsoleModule: React.FC<Props> = ({
             className="btn btn-emerald"
             disabled={!hasStereoSource}
             onClick={onDemixStereoToStems}
-            title="Decomposes the active stereo mix locally in your browser using 75% COLA STFT Harmonic-Percussive + Mid/Side + Sub masks"
+            title="Decomposes stereo mix locally using REPET-SIM Non-Repeating Foreground + Formant + Sibilance-Gated HPSS"
           >
-            Extract 4 Stems Locally from Stereo Mix
+            Extract 4 Stems (REPET-SIM + Formant v2)
           </button>
           <button type="button" className="btn btn-primary" onClick={onRenderStems}>
             Sum Stems &amp; Render Master
@@ -63,11 +82,40 @@ export const StemConsoleModule: React.FC<Props> = ({
       </div>
 
       <div className="callout callout-info" style={{ marginBottom: 10 }}>
-        <strong>Dual Stem Workflow:</strong> Load discrete studio stems directly into each bus OR
-        click <strong>Extract 4 Stems Locally</strong> to decompose any 2-channel stereo mix via our
-        in-browser 75%-COLA STFT Harmonic-Percussive + Azimuthal Mid/Side Partition-of-Unity demixer
-        (guaranteed lossless reconstruction when summed at unity, zero cloud upload).
+        <strong>v2 High-Isolation Stem Demixer:</strong> Combines <strong>REPET-SIM</strong>{' '}
+        non-adjacent cosine spectral similarity (routing repeating chord/synth/guitar patterns to{' '}
+        <em>Instruments</em> while isolating non-repeating melodic vocal phrasing),{' '}
+        <strong>Vocal Sibilance Gating</strong> (keeping 4.5–9.8 kHz consonants attached to{' '}
+        <em>Vocals</em>), and strict <strong>Partition-of-Unity Wiener masks</strong> (&lt;-115 dB
+        lossless sum).
       </div>
+
+      {collisions.length > 0 && (
+        <div
+          className="callout callout-warn"
+          style={{
+            marginBottom: 10,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 10,
+            flexWrap: 'wrap',
+          }}
+        >
+          <div>
+            <strong>Pro-Q / Neutron Spectral Masking Collisions Detected:</strong>
+            {collisions.map((c, idx) => (
+              <div key={idx} style={{ fontSize: 11.5, marginTop: 2 }}>
+                • <strong>{c.regionLabel}</strong> ({c.pair[0].toUpperCase()} vs{' '}
+                {c.pair[1].toUpperCase()}, {c.overlapSeverityDb} dB overlap) — {c.recommendation}
+              </div>
+            ))}
+          </div>
+          <button type="button" className="btn btn-primary" onClick={handleAutoUnmask}>
+            Auto-Unmask Stem Collisions
+          </button>
+        </div>
+      )}
 
       {alignmentWarnings.length > 0 && (
         <div className="callout callout-warn" style={{ marginBottom: 10 }}>

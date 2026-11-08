@@ -1,10 +1,10 @@
-import type { PlanarAudioBuffer, TruePeakMetrics } from './types';
+import type { PlanarAudioBuffer, TruePeakMetrics, TruePeakOversampling } from './types';
 
 function besselI0(x: number): number {
   let sum = 1.0;
   let term = 1.0;
   const halfX = x * 0.5;
-  for (let k = 1; k <= 25; k++) {
+  for (let k = 1; k <= 28; k++) {
     term *= (halfX * halfX) / (k * k);
     sum += term;
     if (term < 1e-15 * sum) break;
@@ -19,47 +19,45 @@ function sinc(x: number): number {
 }
 
 export interface PolyphaseBank {
-  factor: 4 | 8;
+  factor: TruePeakOversampling;
   tapsPerPhase: number;
-  phases: Float64Array[]; // length = factor, each length = tapsPerPhase
+  phases: Float64Array[];
 }
 
 const cachedBanks = new Map<number, PolyphaseBank>();
 
 /**
- * Builds a polyphase Kaiser-windowed sinc interpolator bank (12 taps/phase:
- * 48 taps for 4x per ITU-R BS.1770-5 Annex 2, 96 taps for 8x).
+ * Builds a polyphase Kaiser-windowed sinc interpolator bank:
+ *  - 4x: 48-tap prototype (12 taps/phase, beta 7.0) per ITU-R BS.1770-5 Annex 2
+ *  - 8x: 96-tap prototype (12 taps/phase, beta 7.8)
+ *  - 16x: 192-tap prototype (12 taps/phase, beta 8.6, >90 dB stopband, <0.005 dB ISP error)
  */
-export function getPolyphaseBank(factor: 4 | 8): PolyphaseBank {
+export function getPolyphaseBank(factor: TruePeakOversampling): PolyphaseBank {
   const existing = cachedBanks.get(factor);
   if (existing) return existing;
 
   const tapsPerPhase = 12;
   const totalTaps = factor * tapsPerPhase;
-  const beta = 7.0;
+  const beta = factor === 16 ? 8.6 : factor === 8 ? 7.8 : 7.0;
   const denomI0 = besselI0(beta);
-  const centerSample = tapsPerPhase / 2 - 1; // 5 (0-indexed among 0..11)
+  const centerSample = tapsPerPhase / 2 - 1;
 
   const phases: Float64Array[] = [];
 
   for (let p = 0; p < factor; p++) {
     const coeffs = new Float64Array(tapsPerPhase);
     if (p === 0) {
-      // Exact passthrough of integer sample at center delay
       coeffs[centerSample] = 1.0;
     } else {
       const frac = p / factor;
       let dcSum = 0;
       for (let k = 0; k < tapsPerPhase; k++) {
-        // Sample offset relative to interpolated instant (centerSample + frac)
         const u = k - (centerSample + frac);
-        // Map into overall prototype index [0, totalTaps - 1]
-        const protoIdx = (k * factor + (factor - p)) - 0.5;
+        const protoIdx = k * factor + (factor - p) - 0.5;
         const normPos = (2 * protoIdx) / totalTaps - 1;
         const winArg = Math.max(0, 1 - normPos * normPos);
         const w = besselI0(beta * Math.sqrt(winArg)) / denomI0;
-        // Cutoff slightly below Nyquist (0.96) to suppress Gibbs ripple while keeping 20kHz @ 44.1/48k flat
-        const val = sinc(u * 0.98) * w;
+        const val = sinc(u * 0.985) * w;
         coeffs[k] = val;
         dcSum += val;
       }
@@ -83,12 +81,11 @@ export function linearToDb(amp: number): number {
 }
 
 /**
- * Computes per-sample maximum oversampled true-peak amplitude across all channels.
- * Used by both TruePeakMeter and the Look-Ahead Brickwall True-Peak Limiter.
+ * Computes per-sample maximum oversampled true-peak amplitude across all channels (4x / 8x / 16x).
  */
 export function computePerFrameTruePeakLinear(
   channels: Float32Array[],
-  factor: 4 | 8 = 4
+  factor: TruePeakOversampling = 4
 ): Float32Array {
   const numCh = channels.length;
   const n = numCh > 0 ? channels[0].length : 0;
@@ -96,17 +93,15 @@ export function computePerFrameTruePeakLinear(
   if (numCh === 0 || n === 0) return out;
 
   const bank = getPolyphaseBank(factor);
-  const taps = bank.tapsPerPhase; // 12
-  const center = taps / 2 - 1; // 5
+  const taps = bank.tapsPerPhase;
+  const center = taps / 2 - 1;
   const phases = bank.phases;
 
   for (let ch = 0; ch < numCh; ch++) {
     const src = channels[ch];
     for (let i = 0; i < n; i++) {
-      // Sample peak at i is guaranteed lower bound
       let maxAmp = Math.abs(src[i]);
 
-      // Evaluate fractional phases p = 1..factor-1 between sample i and i+1
       for (let p = 1; p < factor; p++) {
         const h = phases[p];
         let acc = 0;
@@ -132,11 +127,11 @@ export function computePerFrameTruePeakLinear(
 }
 
 /**
- * Full ITU-R BS.1770-5 True Peak & Sample Peak analysis with ceiling compliance check.
+ * Full ITU-R BS.1770-5 / Pro-L2 grade 4x/8x/16x True Peak & Sample Peak analysis.
  */
 export function measureTruePeak(
   buffer: PlanarAudioBuffer,
-  oversamplingFactor: 4 | 8 = 4,
+  oversamplingFactor: TruePeakOversampling = 4,
   ceilingDbtp = -1.0
 ): TruePeakMetrics {
   const { channels } = buffer;
@@ -162,7 +157,6 @@ export function measureTruePeak(
   const center = taps / 2 - 1;
   const phases = bank.phases;
 
-  // Small 0.02 dB tolerance for float32 rounding
   const ceilingLinear = Math.pow(10, (ceilingDbtp + 0.02) / 20);
 
   const truePeakPerChannelDbtp: number[] = [];

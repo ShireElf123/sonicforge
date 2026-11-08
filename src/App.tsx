@@ -26,6 +26,7 @@ import {
   type MonitorVoicing,
   playbackEngine,
 } from './audio/playbackEngine';
+import { tryWebCodecsRoundTrip } from './audio/webCodecsAudit';
 import {
   AssistantAndBenchmarkModule,
   type ServerAdviceData,
@@ -219,6 +220,13 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  const committedParamsRef = useRef<MasteringChainParams | null>(null);
+
+  // Zero-latency (<3 ms) live differential preview on every slider drag before 64-bit worker finishes
+  useEffect(() => {
+    playbackEngine.applyLivePreviewDelta(committedParamsRef.current, params);
+  }, [params]);
+
   // Sync buffers to Web Audio playback engine
   useEffect(() => {
     if (!sourceBuffer) return;
@@ -229,7 +237,8 @@ export const App: React.FC = () => {
       masterAnalysis?.loudness.integratedLufs ?? -14,
       referenceBuffer,
       referenceAnalysis?.loudness.integratedLufs,
-      codecPreviewBuffer
+      codecPreviewBuffer,
+      params.limiter.ceilingDbtp
     );
   }, [
     sourceBuffer,
@@ -239,22 +248,43 @@ export const App: React.FC = () => {
     referenceBuffer,
     referenceAnalysis,
     codecPreviewBuffer,
+    params.limiter.ceilingDbtp,
   ]);
 
-  // Run background lossy codec headroom audit whenever masterBuffer updates
+  // Run background lossy codec headroom audit (24-Bark MDCT + Native Hardware WebCodecs AAC/Opus)
   useEffect(() => {
     if (!masterBuffer || masterBuffer.channels[0]?.length === 0) return;
     let cancelled = false;
-    dspWorker
-      .auditCodecs(masterBuffer, activeCodecId)
-      .then((out) => {
+    (async () => {
+      try {
+        const out = await dspWorker.auditCodecs(masterBuffer, activeCodecId);
         if (cancelled) return;
-        setCodecAudits(out.audits);
-        if (out.previewBuffer) {
-          setCodecPreviewBuffer(out.previewBuffer);
+        let nextAudits = out.audits;
+        let nextPreview = out.previewBuffer;
+
+        // Attempt real W3C WebCodecs hardware bitstream round-trip for AAC-LC 256k & Opus 160k
+        const hwTargets: CodecProfileId[] = ['aac_256', 'ogg_160'];
+        for (const cid of hwTargets) {
+          const hw = await tryWebCodecsRoundTrip(masterBuffer, cid);
+          if (cancelled) return;
+          if (hw) {
+            nextAudits = nextAudits.map((a) => (a.id === cid ? hw.audit : a));
+            if (activeCodecId === cid) {
+              nextPreview = hw.decoded;
+            }
+          }
         }
-      })
-      .catch(() => {});
+
+        if (!cancelled) {
+          setCodecAudits(nextAudits);
+          if (nextPreview) {
+            setCodecPreviewBuffer(nextPreview);
+          }
+        }
+      } catch {
+        // Ignore cancelled / unsupported codec checks
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -285,6 +315,7 @@ export const App: React.FC = () => {
             }
           );
           if (seq !== renderSeqRef.current) return;
+          committedParamsRef.current = chainParams;
           setSourceBuffer(out.summedSource);
           setSourceAnalysis(out.sourceAnalysis);
           setMasterBuffer(out.result.buffer);
@@ -301,6 +332,7 @@ export const App: React.FC = () => {
             }
           });
           if (seq !== renderSeqRef.current) return;
+          committedParamsRef.current = chainParams;
           setMasterBuffer(res.buffer);
           setMasterAnalysis(res.analysis);
           setAppliedDriveDb(res.appliedLimiterDriveDb);
@@ -1142,6 +1174,11 @@ export const App: React.FC = () => {
                   ...prev,
                   [slot]: { ...prev[slot], ...patch },
                 }));
+              }}
+              onReplaceAllBuses={(nextBuses) => {
+                setWorkflowMode('stems');
+                setStemBuses(nextBuses);
+                void triggerRender('stems', sourceBuffer, stems, nextBuses, params);
               }}
               onRenderStems={() => {
                 setWorkflowMode('stems');

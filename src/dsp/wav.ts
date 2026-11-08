@@ -302,7 +302,7 @@ export function decodeWav(arrayBuffer: ArrayBuffer): {
 export function verifyExportedWav(
   wavBinary: ArrayBuffer,
   expectedCeilingDbtp = -1.0,
-  oversamplingFactor: 4 | 8 = 4
+  oversamplingFactor: 4 | 8 | 16 = 4
 ): WavVerificationReport {
   const decoded = decodeWav(wavBinary);
   const loudness = measureLoudnessBs1770(decoded.buffer);
