@@ -1,9 +1,11 @@
+import { applyMixDoctorAutoFix } from './mixDoctor';
 import { classifyProgramArchetype } from './ownAiEngine';
 import { createDefaultMasteringParams } from './profiles';
 import type {
   AudioAnalysisReport,
   LoudnessSweetSpotReport,
   MasteringChainParams,
+  MixDoctorIssue,
 } from './types';
 
 export type AutopilotGenreId =
@@ -386,5 +388,192 @@ export function computeArtistReadinessScorecard(
     score: clampedScore,
     gradeLabel,
     checks,
+  };
+}
+
+export type AutoMasterIntensity = 'warm_smooth' | 'balanced_pro' | 'loud_punchy';
+
+interface GenreReferenceCurve {
+  label: string;
+  subRelDb: number;
+  lowMidRelDb: number;
+  highMidRelDb: number;
+  airRelDb: number;
+  baseLufs: number;
+}
+
+const GENRE_REFERENCE_CURVES: Record<Exclude<AutopilotGenreId, 'auto'>, GenreReferenceCurve> = {
+  trap_hiphop: {
+    label: 'Trap / Hip-Hop / 808',
+    subRelDb: 1.5,
+    lowMidRelDb: -1.6,
+    highMidRelDb: -3.2,
+    airRelDb: -8.5,
+    baseLufs: -9.0,
+  },
+  afro_amapiano: {
+    label: 'Afrobeats / Amapiano',
+    subRelDb: 1.2,
+    lowMidRelDb: -1.2,
+    highMidRelDb: -3.6,
+    airRelDb: -9.0,
+    baseLufs: -9.4,
+  },
+  pop_rnb: {
+    label: 'Pop / R&B / Melodic',
+    subRelDb: -1.0,
+    lowMidRelDb: -1.8,
+    highMidRelDb: -2.4,
+    airRelDb: -7.8,
+    baseLufs: -9.8,
+  },
+  club_edm: {
+    label: 'Club / House / EDM',
+    subRelDb: 1.8,
+    lowMidRelDb: -2.2,
+    highMidRelDb: -3.0,
+    airRelDb: -8.0,
+    baseLufs: -7.8,
+  },
+  rock_indie: {
+    label: 'Indie / Rock / Band',
+    subRelDb: -2.2,
+    lowMidRelDb: -0.8,
+    highMidRelDb: -2.2,
+    airRelDb: -9.2,
+    baseLufs: -10.2,
+  },
+  acoustic_chill: {
+    label: 'Acoustic / Lo-Fi / Chill',
+    subRelDb: -4.0,
+    lowMidRelDb: -0.5,
+    highMidRelDb: -3.5,
+    airRelDb: -10.0,
+    baseLufs: -12.5,
+  },
+};
+
+/**
+ * True Signal-Adaptive 1-Click Auto-Master Engine:
+ * Reads the uploaded song's actual loudness, spectrum, crest, and Mix Doctor issues,
+ * matches it proportionally against the chosen Genre's reference curve, applies surgical
+ * Mix Doctor fixes automatically, and returns plain-English notes of what was tailored.
+ */
+export function computeAdaptiveAutoMasterParams(opts: {
+  genre: AutopilotGenreId;
+  intensity: AutoMasterIntensity;
+  source: AudioAnalysisReport | null;
+  issues?: MixDoctorIssue[];
+  sweetSpot?: LoudnessSweetSpotReport | null;
+  currentMeta?: MasteringChainParams['exportFormat'];
+}): {
+  params: MasteringChainParams;
+  resolvedGenre: Exclude<AutopilotGenreId, 'auto'>;
+  resolvedGenreLabel: string;
+  summaryActions: string[];
+} {
+  const { genre, intensity, source, issues = [], sweetSpot = null, currentMeta } = opts;
+  const resolvedGenre = genre === 'auto' ? resolveAutoGenre(source) : genre;
+  const ref = GENRE_REFERENCE_CURVES[resolvedGenre];
+  const card = AUTOPILOT_GENRE_CARDS.find((c) => c.id === resolvedGenre) ?? AUTOPILOT_GENRE_CARDS[0];
+
+  const intensityOffsetSlam =
+    intensity === 'warm_smooth' ? -18 : intensity === 'loud_punchy' ? 18 : 0;
+
+  let params = buildAutopilotMasteringChain(
+    {
+      genre: resolvedGenre,
+      releaseGoal: intensity === 'loud_punchy' && resolvedGenre === 'club_edm' ? 'club_loud' : 'streaming',
+      loudnessSlamPct: clamp(card.defaultSlam + intensityOffsetSlam, 22, 95),
+      vocalUpfrontPct: card.defaultVocal,
+      bassPhonePunchPct: card.defaultBass,
+      chorusBloomWidthPct: card.defaultBloom,
+    },
+    source,
+    sweetSpot,
+    currentMeta
+  );
+
+  const summaryActions: string[] = [];
+
+  // Calibrate target LUFS from Genre + Intensity + Song's Measured Sweet Spot
+  const intensityLufsDelta =
+    intensity === 'warm_smooth' ? -1.8 : intensity === 'loud_punchy' ? 1.3 : 0;
+  const rawTarget = ref.baseLufs + intensityLufsDelta;
+  const safeTarget = sweetSpot
+    ? clamp(0.65 * rawTarget + 0.35 * sweetSpot.recommendedLufs, -14.0, -7.0)
+    : clamp(rawTarget, -14.0, -7.2);
+  params.limiter.targetLufs = Number(safeTarget.toFixed(1));
+  params.limiter.ceilingDbtp = intensity === 'loud_punchy' ? -0.8 : -1.0;
+
+  if (intensity === 'warm_smooth') {
+    params.exciter.mode = 'tube';
+    params.limiter.softClipMode = 'warm_tanh';
+  }
+
+  // Proportional Spectral Matching against Genre Reference Curve (prevents over-boosting already heavy mixes!)
+  if (source) {
+    const getRel = (id: string) =>
+      source.spectral.bands.find((b) => b.id === id)?.relativeDb ?? -4;
+
+    const subErr = ref.subRelDb - getRel('sub');
+    const lowMidErr = ref.lowMidRelDb - getRel('lowMid');
+    const highMidErr = ref.highMidRelDb - getRel('highMid');
+    const airErr = ref.airRelDb - getRel('air');
+
+    if (params.eqBands[1]) {
+      const subGain = clamp(subErr * 0.45, -2.6, 3.0);
+      params.eqBands[1].gainDb = Number(subGain.toFixed(1));
+      if (Math.abs(subGain) >= 0.5) {
+        summaryActions.push(
+          subGain > 0
+            ? `Added +${subGain.toFixed(1)} dB tight sub-bass weight & phone harmonics for ${ref.label}`
+            : `Controlled ${subGain.toFixed(1)} dB excess sub boom so kicks hit cleaner`
+        );
+      }
+    }
+
+    if (params.eqBands[2]) {
+      const mudGain = clamp(lowMidErr * 0.48, -3.2, 1.2);
+      params.eqBands[2].gainDb = Number(mudGain.toFixed(1));
+    }
+
+    if (params.eqBands[3]) {
+      const voxGain = clamp(highMidErr * 0.5, -2.0, 2.8);
+      params.eqBands[3].gainDb = Number(voxGain.toFixed(1));
+      if (Math.abs(voxGain) >= 0.4) {
+        summaryActions.push(
+          voxGain > 0
+            ? `Lifted center vocal & lead clarity +${voxGain.toFixed(1)} dB`
+            : `Smoothed forward upper-mid glare (${voxGain.toFixed(1)} dB) for warm balance`
+        );
+      }
+    }
+
+    if (params.eqBands[5]) {
+      const airGain = clamp(airErr * 0.42, -1.5, 2.6);
+      params.eqBands[5].gainDb = Number(airGain.toFixed(1));
+    }
+  }
+
+  // Automatically apply all detected Mix Doctor surgical fixes!
+  for (const issue of issues) {
+    params = applyMixDoctorAutoFix(params, issue);
+  }
+  if (issues.length > 0) {
+    summaryActions.push(
+      `Auto-repaired ${issues.length} mix issue(s) (${issues.map((i) => i.category.replace('_', ' ')).join(', ')})`
+    );
+  }
+
+  summaryActions.push(
+    `Mastered to ${params.limiter.targetLufs.toFixed(1)} LUFS (${params.limiter.ceilingDbtp.toFixed(1)} dBTP zero-clip ceiling) with Chorus Bloom`
+  );
+
+  return {
+    params,
+    resolvedGenre,
+    resolvedGenreLabel: ref.label,
+    summaryActions: summaryActions.slice(0, 4),
   };
 }

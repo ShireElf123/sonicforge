@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { analyzeAudioBuffer } from '../src/dsp/analyzer';
 import {
   buildAutopilotMasteringChain,
+  computeAdaptiveAutoMasterParams,
   computeArtistReadinessScorecard,
 } from '../src/dsp/autopilotEngine';
 import { BiquadFilter, designButterworthHighpass2 } from '../src/dsp/biquad';
@@ -209,5 +210,32 @@ describe('SonicForge Pro v4.0 — Guided Artist Autopilot & Next-Gen Mastering E
     expect(dv.getUint32(0, true)).toBe(0x04034b50); // Local File Header signature
     expect(dv.getUint32(zipBuf.byteLength - 22, true)).toBe(0x06054b50); // EOCD signature
     expect(dv.getUint16(zipBuf.byteLength - 12, true)).toBe(2); // 2 entries in central directory
+  });
+
+  it('1-Click Genre Auto-Master solves signal-adaptive spectral balance & Mix Doctor auto-fixes', () => {
+    const mix = generateStudioSession('neon_horizon_mix', 48000, 1.8).stereoMix;
+    const srcAnalysis = analyzeAudioBuffer(mix);
+    const issues = diagnoseMixHeadroomThieves(mix);
+
+    const warmAcoustic = computeAdaptiveAutoMasterParams({
+      genre: 'acoustic_chill',
+      intensity: 'warm_smooth',
+      source: srcAnalysis,
+      issues,
+    });
+    const loudAfro = computeAdaptiveAutoMasterParams({
+      genre: 'afro_amapiano',
+      intensity: 'loud_punchy',
+      source: srcAnalysis,
+      issues,
+    });
+
+    expect(loudAfro.params.limiter.targetLufs).toBeGreaterThan(
+      warmAcoustic.params.limiter.targetLufs + 2.5
+    );
+    expect(loudAfro.summaryActions.length).toBeGreaterThan(0);
+
+    const rendered = renderMasterChain(mix, loudAfro.params);
+    expect(rendered.analysis.truePeak.truePeakDbtp).toBeLessThanOrEqual(-0.75);
   });
 });

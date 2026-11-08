@@ -37,6 +37,7 @@ import {
 } from './components/AssistantAndBenchmarkModule';
 import { CodecAndAlbumModule } from './components/CodecAndAlbumModule';
 import { EqModule } from './components/EqModule';
+import { InstantAutoMasterView } from './components/InstantAutoMasterView';
 import { LimiterExportModule } from './components/LimiterExportModule';
 import { MeteringDock } from './components/MeteringDock';
 import { MultibandModule } from './components/MultibandModule';
@@ -88,6 +89,7 @@ type ModuleTab =
   | 'codec_album';
 
 export const App: React.FC = () => {
+  const [uiMode, setUiMode] = useState<'auto_simple' | 'pro_studio'>('auto_simple');
   const [workflowMode, setWorkflowMode] = useState<'stereo' | 'stems'>('stereo');
   const [activeTab, setActiveTab] = useState<ModuleTab>('autopilot');
   const [selectedBuiltIn, setSelectedBuiltIn] = useState<BuiltInSessionId>('neon_horizon_mix');
@@ -777,13 +779,67 @@ export const App: React.FC = () => {
           <div>
             <div className="brand-title">
               SonicForge Pro
-              <span className="badge badge-cyan">Linear FIR • Stabilizer • IRC-V</span>
+              <span className="badge badge-cyan">
+                {uiMode === 'auto_simple' ? '1-Click Auto-Master' : 'Pro Studio Console'}
+              </span>
             </div>
             <div className="brand-sub">{trackName}</div>
           </div>
+
+          <div
+            className="segmented"
+            style={{
+              marginLeft: 10,
+              border: '1.5px solid rgba(34,211,238,0.45)',
+              padding: 2,
+            }}
+          >
+            <button
+              type="button"
+              className={`seg-btn ${uiMode === 'auto_simple' ? 'active' : ''}`}
+              onClick={() => setUiMode('auto_simple')}
+              style={{ fontWeight: 700, padding: '5px 12px' }}
+            >
+              ⚡ Easy Auto-Master
+            </button>
+            <button
+              type="button"
+              className={`seg-btn ${uiMode === 'pro_studio' ? 'active' : ''}`}
+              onClick={() => setUiMode('pro_studio')}
+              style={{ fontWeight: 700, padding: '5px 12px' }}
+            >
+              🎛️ Pro Studio Rack
+            </button>
+          </div>
         </div>
 
-        <div className="toolbar-group">
+        {uiMode === 'auto_simple' ? (
+          <div className="toolbar-group">
+            <select
+              className="select-input"
+              aria-label="Headphone Harman Calibration"
+              title="Calibrates headphone playback so your ears hear flat studio balance"
+              value={headphoneProfile}
+              onChange={(e) => {
+                const hp = e.target.value as HeadphoneProfile;
+                setHeadphoneProfile(hp);
+                playbackEngine.setHeadphoneProfile(hp);
+              }}
+            >
+              <option value="flat">Headphones: Standard</option>
+              <option value="dt990">DT 990 Pro Corrected</option>
+              <option value="m50x">ATH-M50x Corrected</option>
+              <option value="hd650">HD 650 / 6XX Corrected</option>
+              <option value="airpods_pro">AirPods Pro Corrected</option>
+              <option value="mdr7506">MDR-7506 Corrected</option>
+            </select>
+            <button type="button" className="btn btn-emerald" onClick={handleExportWav}>
+              <Download size={13} /> Export WAV
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="toolbar-group">
           <div className="segmented">
             <button
               type="button"
@@ -1029,9 +1085,54 @@ export const App: React.FC = () => {
             <Download size={13} /> Export {params.exportFormat.bitDepth}-bit WAV
           </button>
         </div>
+          </>
+        )}
       </header>
 
-      <main className="workspace-grid">
+      {uiMode === 'auto_simple' ? (
+        <main style={{ flex: 1, overflowY: 'auto' }}>
+          {errorBanner && (
+            <div style={{ maxWidth: 960, margin: '12px auto 0', padding: '0 16px' }}>
+              <div className="callout callout-warn">{errorBanner}</div>
+            </div>
+          )}
+          <InstantAutoMasterView
+            trackName={trackName}
+            sourceBuffer={sourceBuffer}
+            sourceAnalysis={sourceAnalysis}
+            masterAnalysis={masterAnalysis}
+            params={params}
+            codecAudits={codecAudits}
+            detectedSections={detectedSections}
+            mixDoctorIssues={mixDoctorIssues}
+            sweetSpot={sweetSpot}
+            renderStatus={renderStatus}
+            isPlaying={liveFrame.isPlaying}
+            currentTimeSec={liveFrame.currentTimeSec}
+            durationSec={liveFrame.durationSec}
+            auditionMode={auditionMode}
+            monitorVoicing={monitorVoicing}
+            onUploadTrack={(file) => void handleUploadStereoFile(file)}
+            onApplyAutoMasterParams={(nextParams) => updateParams(nextParams)}
+            onTogglePlay={() => {
+              if (liveFrame.isPlaying) playbackEngine.pause();
+              else void playbackEngine.play();
+            }}
+            onSeek={(sec) => playbackEngine.seek(sec)}
+            onSetAuditionMode={(mode) => {
+              setAuditionMode(mode);
+              playbackEngine.setAuditionMode(mode);
+            }}
+            onSetMonitorVoicing={(voicing) => {
+              setMonitorVoicing(voicing);
+              playbackEngine.setMonitorVoicing(voicing);
+            }}
+            onExportMasterWav={handleExportWav}
+            onSwitchToProConsole={() => setUiMode('pro_studio')}
+          />
+        </main>
+      ) : (
+        <main className="workspace-grid">
         <div className="main-column">
           {errorBanner && <div className="callout callout-warn">{errorBanner}</div>}
 
@@ -1327,7 +1428,8 @@ export const App: React.FC = () => {
           maxGainReductionDb={maxGainReductionDb}
           liveFrame={liveFrame}
         />
-      </main>
+        </main>
+      )}
     </div>
   );
 };
