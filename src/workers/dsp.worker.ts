@@ -1,13 +1,17 @@
 import { analyzeAudioBuffer } from '../dsp/analyzer';
 import { auditLossyCodecHeadroom, renderSimulatedCodecPreview } from '../dsp/codecSim';
+import { diagnoseMixHeadroomThieves } from '../dsp/mixDoctor';
 import { renderMasterChain, sumStemBuses } from '../dsp/processors';
 import { demixStereoToFourStems, type LocalDemixResult } from '../dsp/stemDemixer';
+import { scanLoudnessSweetSpot } from '../dsp/sweetSpotScanner';
 import type {
   AudioAnalysisReport,
   CodecAuditResult,
   CodecProfileId,
+  LoudnessSweetSpotReport,
   MasteringChainParams,
   MasterRenderResult,
+  MixDoctorIssue,
   PlanarAudioBuffer,
   StemBusParams,
   StemSlotId,
@@ -44,6 +48,12 @@ export type WorkerRequest =
       type: 'audit_codecs';
       master: PlanarAudioBuffer;
       previewCodec?: CodecProfileId;
+    }
+  | {
+      id: number;
+      type: 'diagnose_source';
+      source: PlanarAudioBuffer;
+      params: MasteringChainParams;
     };
 
 export type WorkerResponse =
@@ -68,6 +78,12 @@ export type WorkerResponse =
       type: 'audit_codecs_done';
       audits: CodecAuditResult[];
       previewBuffer?: PlanarAudioBuffer;
+    }
+  | {
+      id: number;
+      type: 'diagnose_source_done';
+      issues: MixDoctorIssue[];
+      sweetSpot: LoudnessSweetSpotReport;
     }
   | { id: number; type: 'error'; message: string };
 
@@ -125,6 +141,15 @@ ctx.onmessage = (event: MessageEvent<WorkerRequest>) => {
         type: 'audit_codecs_done',
         audits,
         previewBuffer,
+      } satisfies WorkerResponse);
+    } else if (msg.type === 'diagnose_source') {
+      const issues = diagnoseMixHeadroomThieves(msg.source);
+      const sweetSpot = scanLoudnessSweetSpot(msg.source, msg.params);
+      ctx.postMessage({
+        id: msg.id,
+        type: 'diagnose_source_done',
+        issues,
+        sweetSpot,
       } satisfies WorkerResponse);
     }
   } catch (err) {

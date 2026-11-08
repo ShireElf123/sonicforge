@@ -1,27 +1,53 @@
 import React from 'react';
 import type {
   AudioAnalysisReport,
+  DetectedSection,
   ExciterParams,
+  MacroDynamicsParams,
+  PhantomBassParams,
   StereoStageParams,
 } from '../dsp/types';
 
 interface Props {
   stereo: StereoStageParams;
   exciter: ExciterParams;
+  phantomBass?: PhantomBassParams;
+  macroDynamics?: MacroDynamicsParams;
+  detectedSections?: DetectedSection[];
   sourceAnalysis: AudioAnalysisReport | null;
   masterAnalysis: AudioAnalysisReport | null;
   onChangeStereo: (next: StereoStageParams) => void;
   onChangeExciter: (next: ExciterParams) => void;
+  onChangePhantomBass?: (next: PhantomBassParams) => void;
+  onChangeMacroDynamics?: (next: MacroDynamicsParams) => void;
 }
 
 export const StereoExciterModule: React.FC<Props> = ({
   stereo,
   exciter,
+  phantomBass,
+  macroDynamics,
+  detectedSections,
   sourceAnalysis,
   masterAnalysis,
   onChangeStereo,
   onChangeExciter,
+  onChangePhantomBass,
+  onChangeMacroDynamics,
 }) => {
+  const pb: PhantomBassParams = phantomBass ?? {
+    enabled: false,
+    cutoffHz: 75,
+    amountPct: 35,
+    character: 'warm_808',
+  };
+  const md: MacroDynamicsParams = macroDynamics ?? {
+    enabled: false,
+    chorusLiftDb: 1.0,
+    chorusWidthBoostPct: 14,
+    chorusAirBoostDb: 1.0,
+    verseIntimacyPct: 30,
+  };
   const activeStereo = masterAnalysis?.stereo ?? sourceAnalysis?.stereo;
   const pts = activeStereo?.vectorscopePoints ?? [];
 
@@ -218,6 +244,162 @@ export const StereoExciterModule: React.FC<Props> = ({
             </div>
           </div>
         </div>
+
+        {/* Phantom-Fundamental Sub-Harmonic Synthesizer (808 Phone Audibility) */}
+        {onChangePhantomBass && (
+          <div className="panel">
+            <div className="panel-header">
+              <div className="panel-title">
+                <span>Phantom-Fundamental Bass Translator (Small-Speaker 808 Harmonics)</span>
+                <span className="badge badge-cyan">Chebyshev 2f / 3f Envelope Synthesis</span>
+              </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={pb.enabled}
+                  onChange={(e) => onChangePhantomBass({ ...pb, enabled: e.target.checked })}
+                />
+                <span style={{ fontWeight: 600 }}>Active</span>
+              </label>
+            </div>
+            <div className="param-grid">
+              <div className={`param-card ${!pb.enabled ? 'disabled' : ''}`}>
+                <div className="param-row">
+                  <span>Harmonic Character</span>
+                  <select
+                    className="select-input"
+                    value={pb.character}
+                    onChange={(e) =>
+                      onChangePhantomBass({
+                        ...pb,
+                        character: e.target.value as PhantomBassParams['character'],
+                      })
+                    }
+                  >
+                    <option value="warm_808">Warm 808 / Log-Drum (2nd Harmonic)</option>
+                    <option value="tight_punch">Tight Kick / Bass Guitar (3rd Harmonic)</option>
+                  </select>
+                </div>
+                <div className="param-row">
+                  <span>Sub Fundamental Cutoff</span>
+                  <span className="param-val">{pb.cutoffHz} Hz</span>
+                </div>
+                <input
+                  type="range"
+                  min={45}
+                  max={110}
+                  value={pb.cutoffHz}
+                  onChange={(e) =>
+                    onChangePhantomBass({ ...pb, cutoffHz: Number(e.target.value) })
+                  }
+                />
+              </div>
+              <div className={`param-card ${!pb.enabled ? 'disabled' : ''}`}>
+                <div className="param-row">
+                  <span>Phone / Laptop Bass Presence</span>
+                  <span className="param-val">{pb.amountPct}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={pb.amountPct}
+                  onChange={(e) =>
+                    onChangePhantomBass({ ...pb, amountPct: Number(e.target.value) })
+                  }
+                />
+                <div style={{ fontSize: 10.5, color: 'var(--text-2)', marginTop: 4 }}>
+                  Generates phase-locked 90–240 Hz upper harmonics so 45 Hz sub-bass hits clearly on iPhone/TikTok speakers.
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Section-Aware Macro-Dynamic Arrangement Automation */}
+        {onChangeMacroDynamics && (
+          <div className="panel">
+            <div className="panel-header">
+              <div className="panel-title">
+                <span>Section-Aware Arrangement Macro-Dynamics (Chorus Bloom)</span>
+                <span className="badge badge-emerald">
+                  {detectedSections?.length ?? 0} Sections Mapped
+                </span>
+              </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={md.enabled}
+                  onChange={(e) => onChangeMacroDynamics({ ...md, enabled: e.target.checked })}
+                />
+                <span style={{ fontWeight: 600 }}>Active</span>
+              </label>
+            </div>
+            <div className="param-grid">
+              <div className={`param-card ${!md.enabled ? 'disabled' : ''}`}>
+                <div className="param-row">
+                  <span>Chorus / Drop Impact Lift</span>
+                  <span className="param-val">+{md.chorusLiftDb.toFixed(2)} dB</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={2.4}
+                  step={0.1}
+                  value={md.chorusLiftDb}
+                  onChange={(e) =>
+                    onChangeMacroDynamics({ ...md, chorusLiftDb: Number(e.target.value) })
+                  }
+                />
+                <div className="param-row">
+                  <span>Chorus Stereo Width Bloom</span>
+                  <span className="param-val">+{md.chorusWidthBoostPct}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={28}
+                  value={md.chorusWidthBoostPct}
+                  onChange={(e) =>
+                    onChangeMacroDynamics({
+                      ...md,
+                      chorusWidthBoostPct: Number(e.target.value),
+                    })
+                  }
+                />
+              </div>
+              <div className={`param-card ${!md.enabled ? 'disabled' : ''}`}>
+                <div className="param-row">
+                  <span>Chorus &gt;9.5 kHz Air Shimmer</span>
+                  <span className="param-val">+{md.chorusAirBoostDb.toFixed(1)} dB</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={2.4}
+                  step={0.1}
+                  value={md.chorusAirBoostDb}
+                  onChange={(e) =>
+                    onChangeMacroDynamics({ ...md, chorusAirBoostDb: Number(e.target.value) })
+                  }
+                />
+                <div className="param-row">
+                  <span>Verse Intimacy &amp; Breathing Room</span>
+                  <span className="param-val">{md.verseIntimacyPct}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={80}
+                  value={md.verseIntimacyPct}
+                  onChange={(e) =>
+                    onChangeMacroDynamics({ ...md, verseIntimacyPct: Number(e.target.value) })
+                  }
+                />
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Lissajous Polar Vectorscope & Multi-Band Correlation */}

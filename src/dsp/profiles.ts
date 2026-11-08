@@ -237,6 +237,19 @@ export function createDefaultMasteringParams(
       highFocusHz: 1800,
       mixPct: 30,
     },
+    phantomBass: {
+      enabled: false,
+      cutoffHz: 75,
+      amountPct: 35,
+      character: 'warm_808',
+    },
+    macroDynamics: {
+      enabled: false,
+      chorusLiftDb: 1.0,
+      chorusWidthBoostPct: 14,
+      chorusAirBoostDb: 1.0,
+      verseIntimacyPct: 30,
+    },
     limiter: {
       enabled: true,
       autoGainToTarget: true,
@@ -277,6 +290,19 @@ export function createNeutralBypassParams(): MasteringChainParams {
     multiband: { ...base.multiband, enabled: false },
     stereo: { ...base.stereo, enabled: false },
     exciter: { ...base.exciter, enabled: false },
+    phantomBass: {
+      enabled: false,
+      cutoffHz: 75,
+      amountPct: 0,
+      character: 'warm_808',
+    },
+    macroDynamics: {
+      enabled: false,
+      chorusLiftDb: 0,
+      chorusWidthBoostPct: 0,
+      chorusAirBoostDb: 0,
+      verseIntimacyPct: 0,
+    },
     limiter: {
       ...base.limiter,
       enabled: true,
@@ -284,6 +310,7 @@ export function createNeutralBypassParams(): MasteringChainParams {
       manualDriveDb: 0,
       transientEmphasisPct: 0,
       ceilingDbtp: -0.1,
+      softClipEnabled: false,
     },
   };
 }

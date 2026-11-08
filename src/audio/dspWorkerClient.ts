@@ -1,13 +1,17 @@
 import { analyzeAudioBuffer } from '../dsp/analyzer';
 import { auditLossyCodecHeadroom, renderSimulatedCodecPreview } from '../dsp/codecSim';
+import { diagnoseMixHeadroomThieves } from '../dsp/mixDoctor';
 import { renderMasterChain, sumStemBuses } from '../dsp/processors';
 import { demixStereoToFourStems, type LocalDemixResult } from '../dsp/stemDemixer';
+import { scanLoudnessSweetSpot } from '../dsp/sweetSpotScanner';
 import type {
   AudioAnalysisReport,
   CodecAuditResult,
   CodecProfileId,
+  LoudnessSweetSpotReport,
   MasteringChainParams,
   MasterRenderResult,
+  MixDoctorIssue,
   PlanarAudioBuffer,
   StemBusParams,
   StemSlotId,
@@ -59,6 +63,8 @@ class DspWorkerClient {
             entry.resolve(msg.demixed);
           } else if (msg.type === 'audit_codecs_done') {
             entry.resolve({ audits: msg.audits, previewBuffer: msg.previewBuffer });
+          } else if (msg.type === 'diagnose_source_done') {
+            entry.resolve({ issues: msg.issues, sweetSpot: msg.sweetSpot });
           }
         };
       } catch {
@@ -179,6 +185,29 @@ class DspWorkerClient {
         type: 'audit_codecs',
         master,
         previewCodec,
+      } satisfies WorkerRequest);
+    });
+  }
+
+  async diagnoseSource(
+    source: PlanarAudioBuffer,
+    params: MasteringChainParams
+  ): Promise<{ issues: MixDoctorIssue[]; sweetSpot: LoudnessSweetSpotReport }> {
+    const w = this.ensureWorker();
+    if (!w) {
+      return {
+        issues: diagnoseMixHeadroomThieves(source),
+        sweetSpot: scanLoudnessSweetSpot(source, params),
+      };
+    }
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      w.postMessage({
+        id,
+        type: 'diagnose_source',
+        source,
+        params,
       } satisfies WorkerRequest);
     });
   }

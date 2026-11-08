@@ -8,6 +8,7 @@ import {
 } from './biquad';
 import { applyLinearPhaseEq, applySpectralStabilizer } from './linearPhaseAndStabilizer';
 import { measureLoudnessBs1770 } from './lufs';
+import { applyMacroDynamicAutomation, detectArrangementSections } from './macroDynamics';
 import { computePerFrameTruePeakLinear, getPolyphaseBank } from './truePeak';
 import type {
   EqBandParams,
@@ -17,6 +18,7 @@ import type {
   MasterRenderResult,
   MultibandBandParams,
   MultibandParams,
+  PhantomBassParams,
   PlanarAudioBuffer,
   SoftClipCurveMode,
   StemBusParams,
@@ -980,8 +982,19 @@ export function renderMasterChain(
   }
 
   if (params.exciter.enabled) {
-    onProgress?.('Running 2x Oversampled Harmonic Exciter', 75);
+    onProgress?.('Running 2x Oversampled Harmonic Exciter', 72);
     applyHarmonicExciter(left, right, sr, params.exciter);
+  }
+
+  if (params.phantomBass?.enabled && (params.phantomBass.amountPct ?? 0) > 1) {
+    onProgress?.('Synthesizing Phantom-Fundamental Sub Harmonics', 77);
+    applyPhantomBassTranslator(left, right, sr, params.phantomBass);
+  }
+
+  const detectedSections = detectArrangementSections(work);
+  if (params.macroDynamics?.enabled) {
+    onProgress?.('Applying Section-Aware Macro-Dynamic Automation', 82);
+    applyMacroDynamicAutomation(left, right, sr, params.macroDynamics, detectedSections);
   }
 
   onProgress?.('Calibrating BS.1770 Loudness & IRC True-Peak Limiter', 86);
@@ -1052,6 +1065,64 @@ export function renderMasterChain(
     maxGainReductionDb,
     gainReductionTimelineDb: grTimelineDb,
     stabilizerAttenuationDb,
+    detectedSections,
     processingTimeMs: performance.now() - t0,
   };
+}
+
+/**
+ * Psychoacoustic "Missing Fundamental" Sub-Harmonic Synthesizer (MaxxBass / RBass style).
+ * Isolates sub-bass fundamentals (30 Hz..cutoffHz) on Mid, generates envelope-normalized
+ * Chebyshev 2nd (2f) and 3rd (3f) upper harmonics strictly band-limited to [cutoffHz*1.1, cutoffHz*3.1],
+ * making 40-65 Hz 808s clearly audible on phone, laptop, and Bluetooth speakers without muddying 300+ Hz.
+ */
+export function applyPhantomBassTranslator(
+  left: Float32Array,
+  right: Float32Array,
+  sampleRate: number,
+  params: PhantomBassParams
+): void {
+  if (!params.enabled || params.amountPct <= 0) return;
+
+  const cutoff = Math.max(45, Math.min(115, params.cutoffHz));
+  const subHp = new BiquadFilter(designButterworthHighpass2(28, sampleRate));
+  const subLp1 = new BiquadFilter(designButterworthLowpass2(cutoff, sampleRate));
+  const subLp2 = new BiquadFilter(designButterworthLowpass2(cutoff, sampleRate));
+
+  const harmHp = new BiquadFilter(designButterworthHighpass2(cutoff * 1.12, sampleRate));
+  const harmLp = new BiquadFilter(designButterworthLowpass2(cutoff * 3.1, sampleRate));
+
+  const attCoeff = Math.exp(-1 / Math.max(1, sampleRate * 0.003));
+  const relCoeff = Math.exp(-1 / Math.max(1, sampleRate * 0.045));
+
+  const a2 = params.character === 'warm_808' ? 0.68 : 0.42;
+  const a3 = params.character === 'warm_808' ? 0.32 : 0.58;
+  const blend = (Math.max(0, Math.min(100, params.amountPct)) / 100) * 0.62;
+
+  let env = 1e-4;
+  let dcZ = 0;
+
+  for (let i = 0; i < left.length; i++) {
+    const mid = 0.5 * (left[i] + right[i]);
+    const sub = subLp2.processSample(subLp1.processSample(subHp.processSample(mid)));
+    const absSub = Math.abs(sub);
+    env = absSub > env ? attCoeff * env + (1 - attCoeff) * absSub : relCoeff * env + (1 - relCoeff) * absSub;
+
+    if (env > 1.5e-4) {
+      const u = Math.max(-1, Math.min(1, sub / (env + 1e-7)));
+      // Chebyshev T2(u) = 2u^2 - 1 (DC tracked out), T3(u) = 4u^3 - 3u
+      const t2Raw = 2 * u * u - 1;
+      dcZ = 0.995 * dcZ + 0.005 * t2Raw;
+      const t2 = t2Raw - dcZ;
+      const t3 = 4 * u * u * u - 3 * u;
+
+      const rawHarm = env * (a2 * t2 + a3 * t3);
+      const cleanHarm = harmLp.processSample(harmHp.processSample(rawHarm)) * blend;
+
+      left[i] += cleanHarm;
+      right[i] += cleanHarm;
+    } else {
+      harmLp.processSample(harmHp.processSample(0));
+    }
+  }
 }

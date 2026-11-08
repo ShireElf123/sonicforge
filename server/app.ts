@@ -55,13 +55,14 @@ export function createApiApp(): Express {
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({
       status: 'ok',
-      engine: 'SonicForge Pro DSP v3.0',
+      engine: 'SonicForge Pro DSP v4.0',
       standards: [
         'ITU-R BS.1770-5',
         'EBU R128 / Tech 3341 & 3342',
         '4x/8x/16x Polyphase Kaiser-Sinc True Peak (192-Tap FIR)',
         '4x Oversampled Soft Clipper + IRC-IV Spectral Subband Limiter',
-        'Pro-Q Dynamic M/S EQ + 2049-Tap Linear FIR + 75%-COLA Stabilizer',
+        'Section-Aware Arrangement Macro-Dynamics + Phantom-Fundamental Bass Translator',
+        'Guided Artist Autopilot + Loudness Sweet-Spot Scanner + Mix Doctor + Release Pack ZIP',
         'REPET-SIM + Formant 4-Stem Demixer v2 + Inter-Stem Collision Unmasker',
         'Hardware W3C WebCodecs AAC/Opus + 24-Bark Psychoacoustic Codec Engine',
       ],

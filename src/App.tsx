@@ -21,12 +21,15 @@ import { decodeUploadedAudioFile } from './audio/decodeAudioFile';
 import { dspWorker } from './audio/dspWorkerClient';
 import {
   type AuditionMode,
+  type HeadphoneProfile,
   type LivePlaybackMeterFrame,
   type MonitorMode,
   type MonitorVoicing,
   playbackEngine,
+  type SplMonitorMode,
 } from './audio/playbackEngine';
 import { tryWebCodecsRoundTrip } from './audio/webCodecsAudit';
+import { ArtistAutopilotModule } from './components/ArtistAutopilotModule';
 import {
   AssistantAndBenchmarkModule,
   type ServerAdviceData,
@@ -61,8 +64,11 @@ import type {
   CodecAuditResult,
   CodecProfileId,
   DeliveryProfileId,
+  DetectedSection,
   EqBandParams,
+  LoudnessSweetSpotReport,
   MasteringChainParams,
+  MixDoctorIssue,
   PlanarAudioBuffer,
   StemBusParams,
   StemSlotId,
@@ -71,11 +77,19 @@ import type {
 } from './dsp/types';
 import { encodeWav, verifyExportedWav } from './dsp/wav';
 
-type ModuleTab = 'assistant' | 'eq' | 'multiband' | 'stereo' | 'limiter' | 'stems' | 'codec_album';
+type ModuleTab =
+  | 'autopilot'
+  | 'assistant'
+  | 'eq'
+  | 'multiband'
+  | 'stereo'
+  | 'limiter'
+  | 'stems'
+  | 'codec_album';
 
 export const App: React.FC = () => {
   const [workflowMode, setWorkflowMode] = useState<'stereo' | 'stems'>('stereo');
-  const [activeTab, setActiveTab] = useState<ModuleTab>('assistant');
+  const [activeTab, setActiveTab] = useState<ModuleTab>('autopilot');
   const [selectedBuiltIn, setSelectedBuiltIn] = useState<BuiltInSessionId>('neon_horizon_mix');
   const [trackName, setTrackName] = useState<string>('Neon Horizon — Electronic Mix');
 
@@ -140,6 +154,11 @@ export const App: React.FC = () => {
   const [auditionMode, setAuditionMode] = useState<AuditionMode>('master');
   const [monitorMode, setMonitorMode] = useState<MonitorMode>('stereo');
   const [monitorVoicing, setMonitorVoicing] = useState<MonitorVoicing>('flat');
+  const [headphoneProfile, setHeadphoneProfile] = useState<HeadphoneProfile>('flat');
+  const [splMonitorMode, setSplMonitorMode] = useState<SplMonitorMode>('ref_78');
+  const [detectedSections, setDetectedSections] = useState<DetectedSection[]>([]);
+  const [mixDoctorIssues, setMixDoctorIssues] = useState<MixDoctorIssue[]>([]);
+  const [sweetSpot, setSweetSpot] = useState<LoudnessSweetSpotReport | null>(null);
   const [loopEnabled, setLoopEnabled] = useState<boolean>(true);
   const [liveFrame, setLiveFrame] = useState<LivePlaybackMeterFrame>({
     isPlaying: false,
@@ -290,6 +309,23 @@ export const App: React.FC = () => {
     };
   }, [masterBuffer, activeCodecId]);
 
+  // Run Mix Doctor + Loudness-vs-Punch Sweet-Spot Scanner whenever sourceBuffer changes
+  useEffect(() => {
+    if (!sourceBuffer || sourceBuffer.channels[0]?.length === 0) return;
+    let cancelled = false;
+    dspWorker
+      .diagnoseSource(sourceBuffer, createDefaultMasteringParams('spotify'))
+      .then((diag) => {
+        if (cancelled) return;
+        setMixDoctorIssues(diag.issues);
+        setSweetSpot(diag.sweetSpot);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [sourceBuffer]);
+
   const triggerRender = useCallback(
     async (
       mode: 'stereo' | 'stems',
@@ -325,6 +361,7 @@ export const App: React.FC = () => {
           setAutoDriveCapped(out.result.autoDriveCapped);
           setMaxGainReductionDb(out.result.maxGainReductionDb);
           setStabilizerAttenuationDb(out.result.stabilizerAttenuationDb);
+          setDetectedSections(out.result.detectedSections ?? []);
         } else if (srcBuf) {
           const res = await dspWorker.renderStereo(srcBuf, chainParams, (stage, pct) => {
             if (seq === renderSeqRef.current) {
@@ -339,6 +376,7 @@ export const App: React.FC = () => {
           setAutoDriveCapped(res.autoDriveCapped);
           setMaxGainReductionDb(res.maxGainReductionDb);
           setStabilizerAttenuationDb(res.stabilizerAttenuationDb);
+          setDetectedSections(res.detectedSections ?? []);
         }
       } catch (err) {
         if (seq === renderSeqRef.current) {
@@ -914,6 +952,41 @@ export const App: React.FC = () => {
               <option value="club">Club Sub PA Rig</option>
               <option value="auratone">Midrange Cube (Mono)</option>
             </select>
+
+            <select
+              className="select-input"
+              aria-label="Headphone Harman Calibration"
+              title="Monitor-only Headphone Harman-Target Compensation (never alters exported WAV)"
+              value={headphoneProfile}
+              onChange={(e) => {
+                const hp = e.target.value as HeadphoneProfile;
+                setHeadphoneProfile(hp);
+                playbackEngine.setHeadphoneProfile(hp);
+              }}
+            >
+              <option value="flat">Headphones: Uncalibrated</option>
+              <option value="dt990">DT 990 Pro Corrected</option>
+              <option value="m50x">ATH-M50x Corrected</option>
+              <option value="hd650">HD 650 / 6XX Corrected</option>
+              <option value="airpods_pro">AirPods Pro Corrected</option>
+              <option value="mdr7506">MDR-7506 Corrected</option>
+            </select>
+
+            <select
+              className="select-input"
+              aria-label="ISO 226 SPL Ear Perception"
+              title="ISO 226 Equal-Loudness Fletcher-Munson Ear Simulator (check Quiet Night vs Club PA)"
+              value={splMonitorMode}
+              onChange={(e) => {
+                const sm = e.target.value as SplMonitorMode;
+                setSplMonitorMode(sm);
+                playbackEngine.setSplMonitorMode(sm);
+              }}
+            >
+              <option value="ref_78">Ear Check: 78 dB Studio</option>
+              <option value="quiet_55">Ear Check: 55 dB Quiet</option>
+              <option value="club_98">Ear Check: 98 dB Club</option>
+            </select>
           </div>
         </div>
 
@@ -997,10 +1070,17 @@ export const App: React.FC = () => {
           <nav className="module-tabs" aria-label="Mastering Chain Modules">
             <button
               type="button"
+              className={`tab-btn ${activeTab === 'autopilot' ? 'active' : ''}`}
+              onClick={() => setActiveTab('autopilot')}
+            >
+              <Sparkles size={14} /> Guided Artist Autopilot &amp; Release Pack
+            </button>
+            <button
+              type="button"
               className={`tab-btn ${activeTab === 'assistant' ? 'active' : ''}`}
               onClick={() => setActiveTab('assistant')}
             >
-              <Sparkles size={14} /> Assistant, Reference &amp; Industry Benchmark
+              <Sparkles size={14} /> AI Co-Pilot, Reference &amp; Benchmark
             </button>
             <button
               type="button"
@@ -1045,6 +1125,32 @@ export const App: React.FC = () => {
               <Disc3 size={14} /> Codec Sim &amp; Album Batch
             </button>
           </nav>
+
+          {activeTab === 'autopilot' && (
+            <ArtistAutopilotModule
+              trackName={trackName}
+              sourceBuffer={sourceBuffer}
+              sourceAnalysis={sourceAnalysis}
+              masterAnalysis={masterAnalysis}
+              params={params}
+              codecAudits={codecAudits}
+              detectedSections={detectedSections}
+              mixDoctorIssues={mixDoctorIssues}
+              sweetSpot={sweetSpot}
+              auditionMode={auditionMode}
+              onApplyParams={(nextParams) => updateParams(nextParams)}
+              onJumpAndLoopMoment={(startSec, endSec) => {
+                setLoopEnabled(true);
+                playbackEngine.setLoop(true, startSec, endSec);
+                void playbackEngine.play(startSec);
+              }}
+              onSetAuditionMode={(mode) => {
+                setAuditionMode(mode);
+                playbackEngine.setAuditionMode(mode);
+              }}
+              onSwitchToProRack={() => setActiveTab('eq')}
+            />
+          )}
 
           {activeTab === 'assistant' && (
             <AssistantAndBenchmarkModule
@@ -1135,10 +1241,19 @@ export const App: React.FC = () => {
             <StereoExciterModule
               stereo={params.stereo}
               exciter={params.exciter}
+              phantomBass={params.phantomBass}
+              macroDynamics={params.macroDynamics}
+              detectedSections={detectedSections}
               sourceAnalysis={sourceAnalysis}
               masterAnalysis={masterAnalysis}
               onChangeStereo={(stereo) => updateParams((prev) => ({ ...prev, stereo }))}
               onChangeExciter={(exciter) => updateParams((prev) => ({ ...prev, exciter }))}
+              onChangePhantomBass={(phantomBass) =>
+                updateParams((prev) => ({ ...prev, phantomBass }))
+              }
+              onChangeMacroDynamics={(macroDynamics) =>
+                updateParams((prev) => ({ ...prev, macroDynamics }))
+              }
             />
           )}
 

@@ -13,6 +13,16 @@ export type MonitorMode = 'stereo' | 'mono' | 'mid' | 'side';
 
 export type MonitorVoicing = 'flat' | 'phone' | 'car' | 'club' | 'auratone';
 
+export type HeadphoneProfile =
+  | 'flat'
+  | 'dt990'
+  | 'm50x'
+  | 'hd650'
+  | 'airpods_pro'
+  | 'mdr7506';
+
+export type SplMonitorMode = 'ref_78' | 'quiet_55' | 'club_98';
+
 export interface LivePlaybackMeterFrame {
   isPlaying: boolean;
   currentTimeSec: number;
@@ -95,6 +105,14 @@ export class StudioPlaybackEngine {
   private vLpf: BiquadFilterNode | null = null;
   private vTrim: GainNode | null = null;
 
+  // Headphone Harman Compensation + ISO 226 SPL Equal-Loudness (strictly monitor-only)
+  private hpLow: BiquadFilterNode | null = null;
+  private hpMid: BiquadFilterNode | null = null;
+  private hpHigh: BiquadFilterNode | null = null;
+  private splLow: BiquadFilterNode | null = null;
+  private splPres: BiquadFilterNode | null = null;
+  private splTrim: GainNode | null = null;
+
   private analyserL: AnalyserNode | null = null;
   private analyserR: AnalyserNode | null = null;
   private meterSplitter: ChannelSplitterNode | null = null;
@@ -104,6 +122,8 @@ export class StudioPlaybackEngine {
   private auditionMode: AuditionMode = 'master';
   private monitorMode: MonitorMode = 'stereo';
   private monitorVoicing: MonitorVoicing = 'flat';
+  private headphoneProfile: HeadphoneProfile = 'flat';
+  private splMonitorMode: SplMonitorMode = 'ref_78';
   private masterMatchGainLin = 1.0;
   private refMatchGainLin = 1.0;
 
@@ -240,20 +260,35 @@ export class StudioPlaybackEngine {
     this.vMid.connect(this.vLpf);
     this.vLpf.connect(this.vTrim);
 
+    this.hpLow = ctx.createBiquadFilter();
+    this.hpMid = ctx.createBiquadFilter();
+    this.hpHigh = ctx.createBiquadFilter();
+    this.splLow = ctx.createBiquadFilter();
+    this.splPres = ctx.createBiquadFilter();
+    this.splTrim = ctx.createGain();
+
     this.meterSplitter = ctx.createChannelSplitter(2);
     this.analyserL = ctx.createAnalyser();
     this.analyserR = ctx.createAnalyser();
     this.analyserL.fftSize = 1024;
     this.analyserR.fftSize = 1024;
 
-    this.vTrim.connect(ctx.destination);
     this.vTrim.connect(this.meterSplitter);
     this.meterSplitter.connect(this.analyserL, 0);
     this.meterSplitter.connect(this.analyserR, 1);
 
+    this.vTrim.connect(this.hpLow);
+    this.hpLow.connect(this.hpMid);
+    this.hpMid.connect(this.hpHigh);
+    this.hpHigh.connect(this.splLow);
+    this.splLow.connect(this.splPres);
+    this.splPres.connect(this.splTrim);
+    this.splTrim.connect(ctx.destination);
+
     this.applyAuditionGains(true);
     this.applyMonitorMatrix(true);
     this.applyVoicingFilters();
+    this.applyHeadphoneAndSplFilters();
   }
 
   /**
@@ -443,6 +478,124 @@ export class StudioPlaybackEngine {
     if (this.ctx) {
       this.applyVoicingFilters();
       this.applyMonitorMatrix(false);
+    }
+  }
+
+  setHeadphoneProfile(profile: HeadphoneProfile): void {
+    this.headphoneProfile = profile;
+    if (this.ctx) {
+      this.applyHeadphoneAndSplFilters();
+    }
+  }
+
+  setSplMonitorMode(mode: SplMonitorMode): void {
+    this.splMonitorMode = mode;
+    if (this.ctx) {
+      this.applyHeadphoneAndSplFilters();
+    }
+  }
+
+  private applyHeadphoneAndSplFilters(): void {
+    if (!this.hpLow || !this.hpMid || !this.hpHigh || !this.splLow || !this.splPres || !this.splTrim) {
+      return;
+    }
+
+    // 1. Headphone Harman-Target Compensation (monitor-only, never baked into WAV)
+    switch (this.headphoneProfile) {
+      case 'flat':
+        this.hpLow.type = 'peaking';
+        this.hpLow.gain.value = 0;
+        this.hpMid.type = 'peaking';
+        this.hpMid.gain.value = 0;
+        this.hpHigh.type = 'peaking';
+        this.hpHigh.gain.value = 0;
+        break;
+      case 'dt990':
+        this.hpLow.type = 'peaking';
+        this.hpLow.frequency.value = 145;
+        this.hpLow.Q.value = 1.0;
+        this.hpLow.gain.value = -2.2;
+        this.hpMid.type = 'peaking';
+        this.hpMid.frequency.value = 3200;
+        this.hpMid.Q.value = 1.2;
+        this.hpMid.gain.value = 1.5;
+        this.hpHigh.type = 'peaking';
+        this.hpHigh.frequency.value = 8600;
+        this.hpHigh.Q.value = 2.4;
+        this.hpHigh.gain.value = -5.2;
+        break;
+      case 'm50x':
+        this.hpLow.type = 'peaking';
+        this.hpLow.frequency.value = 105;
+        this.hpLow.Q.value = 1.1;
+        this.hpLow.gain.value = -3.0;
+        this.hpMid.type = 'peaking';
+        this.hpMid.frequency.value = 440;
+        this.hpMid.Q.value = 1.2;
+        this.hpMid.gain.value = 2.6;
+        this.hpHigh.type = 'peaking';
+        this.hpHigh.frequency.value = 9400;
+        this.hpHigh.Q.value = 1.8;
+        this.hpHigh.gain.value = -2.4;
+        break;
+      case 'hd650':
+        this.hpLow.type = 'lowshelf';
+        this.hpLow.frequency.value = 60;
+        this.hpLow.gain.value = 4.2;
+        this.hpMid.type = 'peaking';
+        this.hpMid.frequency.value = 3100;
+        this.hpMid.Q.value = 1.1;
+        this.hpMid.gain.value = 1.8;
+        this.hpHigh.type = 'highshelf';
+        this.hpHigh.frequency.value = 10500;
+        this.hpHigh.gain.value = 2.0;
+        break;
+      case 'airpods_pro':
+        this.hpLow.type = 'lowshelf';
+        this.hpLow.frequency.value = 75;
+        this.hpLow.gain.value = -2.3;
+        this.hpMid.type = 'peaking';
+        this.hpMid.frequency.value = 2600;
+        this.hpMid.Q.value = 1.1;
+        this.hpMid.gain.value = 2.2;
+        this.hpHigh.type = 'highshelf';
+        this.hpHigh.frequency.value = 10500;
+        this.hpHigh.gain.value = 1.4;
+        break;
+      case 'mdr7506':
+        this.hpLow.type = 'lowshelf';
+        this.hpLow.frequency.value = 58;
+        this.hpLow.gain.value = 2.8;
+        this.hpMid.type = 'peaking';
+        this.hpMid.frequency.value = 3400;
+        this.hpMid.Q.value = 1.6;
+        this.hpMid.gain.value = -3.6;
+        this.hpHigh.type = 'peaking';
+        this.hpHigh.frequency.value = 9800;
+        this.hpHigh.Q.value = 1.8;
+        this.hpHigh.gain.value = -2.0;
+        break;
+    }
+
+    // 2. ISO 226:2023 Equal-Loudness Fletcher-Munson Perception Simulator
+    this.splLow.type = 'lowshelf';
+    this.splLow.frequency.value = 115;
+    this.splPres.type = 'peaking';
+    this.splPres.frequency.value = 3500;
+    this.splPres.Q.value = 1.25;
+
+    if (this.splMonitorMode === 'quiet_55') {
+      this.splLow.gain.value = -5.5;
+      this.splPres.gain.value = 1.6;
+      this.splTrim.gain.value = 0.56;
+    } else if (this.splMonitorMode === 'club_98') {
+      this.splLow.gain.value = 3.2;
+      this.splPres.gain.value = 2.6;
+      this.splTrim.gain.value = 0.82;
+    } else {
+      this.splLow.gain.value = 0;
+      this.splPres.gain.value = 0;
+      this.splTrim.gain.value = 0.92;
     }
   }
 

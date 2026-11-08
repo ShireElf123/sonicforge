@@ -181,6 +181,33 @@ export interface ExciterParams {
   mixPct: number;
 }
 
+export interface PhantomBassParams {
+  enabled: boolean;
+  cutoffHz: number;
+  amountPct: number;
+  character: 'tight_punch' | 'warm_808';
+}
+
+export type ArrangementSectionType = 'intro' | 'verse' | 'build' | 'chorus' | 'outro';
+
+export interface DetectedSection {
+  id: string;
+  type: ArrangementSectionType;
+  label: string;
+  startSec: number;
+  endSec: number;
+  rmsDb: number;
+  relativeLiftDb: number;
+}
+
+export interface MacroDynamicsParams {
+  enabled: boolean;
+  chorusLiftDb: number;
+  chorusWidthBoostPct: number;
+  chorusAirBoostDb: number;
+  verseIntimacyPct: number;
+}
+
 export type LimiterReleaseMode =
   | 'transparent'
   | 'irc_transient'
@@ -234,6 +261,8 @@ export interface MasteringChainParams {
   multiband: MultibandParams;
   stereo: StereoStageParams;
   exciter: ExciterParams;
+  phantomBass?: PhantomBassParams;
+  macroDynamics?: MacroDynamicsParams;
   limiter: LimiterParams;
   exportFormat: ExportFormatParams;
 }
@@ -264,7 +293,37 @@ export interface MasterRenderResult {
   maxGainReductionDb: number;
   gainReductionTimelineDb: number[];
   stabilizerAttenuationDb: number[];
+  detectedSections?: DetectedSection[];
   processingTimeMs: number;
+}
+
+export interface SweetSpotOperatingPoint {
+  targetLufs: number;
+  achievedLufs: number;
+  plrDb: number;
+  punchRetentionPct: number;
+  maxGainReductionDb: number;
+  isSweetSpot: boolean;
+}
+
+export interface LoudnessSweetSpotReport {
+  points: SweetSpotOperatingPoint[];
+  recommendedLufs: number;
+  cliffLufs: number;
+  explanation: string;
+}
+
+export interface MixDoctorIssue {
+  id: string;
+  timestampSec: number;
+  endSec: number;
+  category: 'headroom_thief' | 'phase_cancel' | 'harsh_spike' | 'mud_buildup' | 'sub_rumble';
+  severity: 'high' | 'medium';
+  title: string;
+  plainEnglishWhy: string;
+  dawMixAdvice: string;
+  measuredValueLabel: string;
+  autoFixLabel: string;
 }
 
 export interface WavVerificationReport {
