@@ -1,26 +1,21 @@
-# Security and release checklist
+# Security and Audio Integrity Checklist
 
-## Known blockers
+## Implemented security controls
 
-- Do not treat a client-side token or client-supplied subscription tier as authentication or authorization.
-- Production authentication must validate signed sessions or tokens on the server.
-- Subscription access must be derived from server-verified entitlements, never request-body fields.
-- Keep Gemini and other provider credentials server-side; never expose secrets in Vite-prefixed variables or browser bundles.
-- Apply request-size limits, input validation, rate limits and safe error handling to API routes.
-- Restrict upload types and sizes, and validate audio files before decoding or processing.
+- **Zero client-tier trust**: `/api/mastering/advise` enforces `.strict()` Zod validation (`server/schemas.ts`) and rejects unexpected fields such as `subscriptionTier` with HTTP `400`.
+- **Cryptographically signed sessions**: `server/auth.ts` issues HMAC-SHA256 signed `HttpOnly; SameSite=Lax` cookies (`sf_session`) verified via `crypto.timingSafeEqual`.
+- **Server-side secret isolation**: `GEMINI_API_KEY` is read exclusively in `server/advisor.ts` and never exposed in `VITE_*` variables or browser bundles.
+- **Payload & rate guards**: Express applies a `32kb` JSON body cap, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, and sliding-window IP rate limiting (`RateLimit-*` headers, HTTP `429`).
+- **Browser decode guards**: `src/audio/decodeAudioFile.ts` enforces file extension/MIME validation, non-empty checks, and a `180 MB` file size budget before decoding.
 
-## Audio measurement integrity
+## Implemented audio measurement integrity guarantees
 
-- Do not label RMS-derived estimates as integrated LUFS.
-- Do not label sample peak as true peak.
-- Implement and verify ITU-R BS.1770 / EBU R128 loudness measurement and oversampled true-peak measurement before making compliance claims.
-- Test with known reference signals and independently verified measurement tools.
+- **Standards-compliant LUFS**: Integrated loudness, Momentary, Short-Term, and LRA are computed strictly via ITU-R BS.1770-5 K-weighting and EBU Tech 3341/3342 gating (`src/dsp/lufs.ts`). RMS is reported separately in `dBFS` and never labeled as LUFS.
+- **Oversampled True Peak**: True Peak (`dBTP`) is computed via 4x (48-tap) or 8x (96-tap) polyphase Kaiser-windowed sinc FIR interpolation (`src/dsp/truePeak.ts`), distinct from discrete Sample Peak (`dBFS`).
+- **Measured output verification**: Rendered masters and exported WAV files are independently measured after processing and encoding (`src/dsp/wav.ts`), never populated from requested target settings.
 
-## Before production
+## Required before commercial SaaS deployment
 
-- Configure real identity and billing providers.
-- Rotate any credentials that may have been exposed in earlier builds.
-- Review dependencies and lockfile.
-- Run type-check, production build, unit tests and end-to-end tests.
-- Perform security review of upload, API and entitlement paths.
-- Remove demo-only claims and synthetic metrics from customer-facing output.
+- Set a strong 32-byte random `SESSION_HMAC_SECRET` in production environment secrets.
+- Connect a production OAuth/OIDC identity provider and server-side billing webhooks before gating paid tiers.
+- Back rate limiting with Redis when deploying across multiple horizontal instances.
