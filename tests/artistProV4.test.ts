@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { analyzeAudioBuffer } from '../src/dsp/analyzer';
+import { computeSignalDrivenAssistant } from '../src/dsp/assistant';
 import {
   buildAutopilotMasteringChain,
   computeAdaptiveAutoMasterParams,
@@ -300,5 +301,48 @@ describe('SonicForge Pro v4.0 — Guided Artist Autopilot & Next-Gen Mastering E
     // Backs off input gain and relaxes multiband ratios to 1.22:1 so it NEVER double-squashes!
     expect(solvedHot.params.inputGainDb).toBeLessThan(-2.0);
     expect(solvedHot.params.multiband.bands[0].ratio).toBeLessThanOrEqual(1.25);
+  });
+
+  it('Pro Studio Rack Guided Autopilot & AI Signal Assistant share -16.5 LUFS staging, hot-mix protection & 16x True-Peak', () => {
+    const sr = 48000;
+    const N = Math.floor(sr * 1.5);
+    const hotL = new Float32Array(N);
+    const hotR = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const t = i / sr;
+      const raw =
+        0.58 * Math.sin(2 * Math.PI * 65 * t) +
+        0.45 * Math.sin(2 * Math.PI * 320 * t) +
+        0.3 * Math.sin(2 * Math.PI * 2800 * t);
+      hotL[i] = Math.tanh(raw * 1.8) * 0.72;
+      hotR[i] = Math.tanh(raw * 1.8) * 0.72;
+    }
+    const hotMix: PlanarAudioBuffer = { sampleRate: sr, duration: 1.5, channels: [hotL, hotR] };
+    const hotRep = analyzeAudioBuffer(hotMix);
+
+    // 1. Pro Studio Guided Autopilot
+    const proGuided = buildAutopilotMasteringChain(
+      {
+        genre: 'trap_hiphop',
+        releaseGoal: 'streaming',
+        loudnessSlamPct: 70,
+        vocalUpfrontPct: 65,
+        bassPhonePunchPct: 72,
+        chorusBloomWidthPct: 60,
+      },
+      hotRep,
+      null
+    );
+    expect(proGuided.inputGainDb).toBeLessThan(-2.0);
+    expect(proGuided.multiband.bands[0].ratio).toBeLessThanOrEqual(1.25);
+    expect(proGuided.limiter.oversampling).toBe(16);
+    expect(proGuided.exportFormat.dither).toBe('tpdf_shaped');
+
+    // 2. Pro Studio AI Signal Assistant
+    const proAssist = computeSignalDrivenAssistant(hotRep, 'spotify', 'modern_punch');
+    expect(proAssist.params.inputGainDb).toBeLessThan(-2.0);
+    expect(proAssist.params.multiband.bands[0].ratio).toBeLessThanOrEqual(1.25);
+    expect(proAssist.params.limiter.oversampling).toBe(16);
+    expect(proAssist.params.exportFormat.dither).toBe('tpdf_shaped');
   });
 });

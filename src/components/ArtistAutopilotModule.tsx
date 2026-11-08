@@ -2,11 +2,13 @@ import React, { useMemo, useState } from 'react';
 import { dspWorker } from '../audio/dspWorkerClient';
 import type { AuditionMode } from '../audio/playbackEngine';
 import {
+  type AutoMasterIntensity,
   AUTOPILOT_GENRE_CARDS,
   type AutopilotFeelMacros,
   type AutopilotGenreId,
   type AutopilotReleaseGoal,
   buildAutopilotMasteringChain,
+  computeAdaptiveAutoMasterParams,
   computeArtistReadinessScorecard,
 } from '../dsp/autopilotEngine';
 import { applyMixDoctorAutoFix } from '../dsp/mixDoctor';
@@ -77,6 +79,8 @@ export const ArtistAutopilotModule: React.FC<Props> = ({
   // 1-Click Complete Release Pack (.zip) Export State
   const [includeInstrumental, setIncludeInstrumental] = useState(false);
   const [packProgress, setPackProgress] = useState<string | null>(null);
+  const [proAutoIntensity, setProAutoIntensity] = useState<AutoMasterIntensity>('balanced_pro');
+  const [proAutoActions, setProAutoActions] = useState<string[]>([]);
 
   const readiness = useMemo(
     () => computeArtistReadinessScorecard(masterAnalysis, params),
@@ -89,13 +93,29 @@ export const ArtistAutopilotModule: React.FC<Props> = ({
       nextMacros,
       sourceAnalysis,
       sweetSpot,
-      params.exportFormat
+      params.exportFormat,
+      mixDoctorIssues
     );
     onApplyParams(built);
   };
 
+  const handleRunStudioAutoMaster = (intensity: AutoMasterIntensity) => {
+    setProAutoIntensity(intensity);
+    const res = computeAdaptiveAutoMasterParams({
+      genre: macros.genre,
+      intensity,
+      source: sourceAnalysis,
+      issues: mixDoctorIssues,
+      sweetSpot,
+      currentMeta: params.exportFormat,
+    });
+    setProAutoActions(res.summaryActions);
+    onApplyParams(res.params);
+  };
+
   const handleSelectGenre = (g: AutopilotGenreId) => {
     const card = AUTOPILOT_GENRE_CARDS.find((c) => c.id === g) ?? AUTOPILOT_GENRE_CARDS[0];
+    setProAutoActions([]);
     applyMacros({
       ...macros,
       genre: g,
@@ -385,7 +405,7 @@ export const ArtistAutopilotModule: React.FC<Props> = ({
           })}
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-1)' }}>
             Primary Release Goal:
           </span>
@@ -412,7 +432,63 @@ export const ArtistAutopilotModule: React.FC<Props> = ({
               TikTok / Reels / YouTube Shorts
             </button>
           </div>
+
+          <span
+            style={{
+              fontSize: 12,
+              fontWeight: 600,
+              color: 'var(--cyan)',
+              marginLeft: 'auto',
+            }}
+          >
+            ⚡ 1-Click Studio Auto-Master:
+          </span>
+          <div className="segmented">
+            <button
+              type="button"
+              className={`seg-btn ${proAutoActions.length > 0 && proAutoIntensity === 'warm_smooth' ? 'active' : ''}`}
+              onClick={() => handleRunStudioAutoMaster('warm_smooth')}
+            >
+              ☁️ Warm &amp; Smooth
+            </button>
+            <button
+              type="button"
+              className={`seg-btn ${proAutoActions.length > 0 && proAutoIntensity === 'balanced_pro' ? 'active' : ''}`}
+              onClick={() => handleRunStudioAutoMaster('balanced_pro')}
+            >
+              ✨ Balanced Radio
+            </button>
+            <button
+              type="button"
+              className={`seg-btn ${proAutoActions.length > 0 && proAutoIntensity === 'loud_punchy' ? 'active-amber' : ''}`}
+              onClick={() => handleRunStudioAutoMaster('loud_punchy')}
+            >
+              🔥 Loud &amp; Punchy
+            </button>
+          </div>
         </div>
+
+        {proAutoActions.length > 0 && (
+          <div
+            style={{
+              marginTop: 10,
+              padding: '8px 12px',
+              borderRadius: 8,
+              background: 'rgba(16, 185, 129, 0.09)',
+              border: '1px solid rgba(16, 185, 129, 0.35)',
+              fontSize: 11.5,
+              color: 'var(--text-1)',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '6px 14px',
+            }}
+          >
+            <strong style={{ color: '#34d399' }}>✓ Studio Auto-Master Applied to Pro Rack:</strong>
+            {proAutoActions.map((act, idx) => (
+              <span key={idx}>• {act}</span>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* STEP 2: 4 Musical Feel Sliders + Loudness Sweet-Spot Scanner + Chorus Section Map */}

@@ -165,14 +165,17 @@ function resolveAutoGenre(source: AudioAnalysisReport | null): Exclude<Autopilot
 /**
  * Translates plain-English Artist Autopilot macros + measured track acoustics
  * into a complete, studio-calibrated MasteringChainParams configuration.
+ * Shared by both Pro Studio Rack (Guided Autopilot) and Easy Auto-Master.
  */
 export function buildAutopilotMasteringChain(
   macros: AutopilotFeelMacros,
   source: AudioAnalysisReport | null,
   sweetSpot: LoudnessSweetSpotReport | null,
-  currentMeta?: MasteringChainParams['exportFormat']
+  currentMeta?: MasteringChainParams['exportFormat'],
+  issues: MixDoctorIssue[] = []
 ): MasteringChainParams {
   const effectiveGenre = macros.genre === 'auto' ? resolveAutoGenre(source) : macros.genre;
+  const ref = GENRE_REFERENCE_CURVES[effectiveGenre];
   const baseProfile =
     macros.releaseGoal === 'club_loud'
       ? 'club_loud'
@@ -180,26 +183,38 @@ export function buildAutopilotMasteringChain(
         ? 'spotify'
         : 'custom';
 
-  const next = createDefaultMasteringParams(baseProfile);
+  let next = createDefaultMasteringParams(baseProfile);
   if (currentMeta) {
     next.exportFormat = JSON.parse(JSON.stringify(currentMeta));
   }
+  next.exportFormat.bitDepth = 24;
+  next.exportFormat.dither = 'tpdf_shaped';
 
   const slam = clamp(macros.loudnessSlamPct, 0, 100) / 100;
   const vox = clamp(macros.vocalUpfrontPct, 0, 100) / 100;
   const bass = clamp(macros.bassPhonePunchPct, 0, 100) / 100;
   const bloom = clamp(macros.chorusBloomWidthPct, 0, 100) / 100;
 
+  // 0. Studio-Grade -16.5 LUFS Pre-Chain Input Gain Staging + DC Offset Protection
+  if (source) {
+    if (Number.isFinite(source.loudness.integratedLufs) && source.loudness.integratedLufs > -60) {
+      const stageGain = clamp(-16.5 - source.loudness.integratedLufs, -9.0, 9.0);
+      next.inputGainDb = Number(stageGain.toFixed(1));
+    }
+    if (Math.abs(source.dynamics.dcOffset) > 0.0015) {
+      next.dcBlockEnabled = true;
+    }
+  }
+
   // 1. Target Loudness & Ceiling calibrated to Release Goal + Sweet Spot Scanner
   const sweetLufs = sweetSpot?.recommendedLufs ?? -9.5;
   if (macros.releaseGoal === 'streaming') {
-    // -14.0 LUFS at 0% slam -> sweetSpot/-9.2 LUFS at 100% competitive streaming slam
     const maxCompetitive = Math.min(-8.5, Math.max(-11.0, sweetLufs + 0.8));
     next.limiter.targetLufs = Number((-14.0 + slam * (maxCompetitive - -14.0)).toFixed(1));
     next.limiter.ceilingDbtp = -1.0; // Codec-safe for Spotify / Apple Music / DistroKid
   } else if (macros.releaseGoal === 'club_loud') {
     next.limiter.targetLufs = Number((-10.5 + slam * 3.3).toFixed(1)); // -10.5 -> -7.2 LUFS
-    next.limiter.ceilingDbtp = -0.6;
+    next.limiter.ceilingDbtp = -0.8;
   } else {
     // TikTok / Reels / Shorts: loud & punchy mobile translation with -1.0 dBTP AAC headroom
     next.limiter.targetLufs = Number((-11.5 + slam * 2.8).toFixed(1)); // -11.5 -> -8.7 LUFS
@@ -210,29 +225,52 @@ export function buildAutopilotMasteringChain(
   next.limiter.maxAutoDriveDb = 16.5;
   next.limiter.releaseMode = slam > 0.55 ? 'irc_spectral' : 'irc_transient';
   next.limiter.transientEmphasisPct = Math.round(25 + slam * 45);
-  next.limiter.oversampling = slam > 0.65 ? 16 : 8;
+  next.limiter.oversampling = 16; // 192-tap Kaiser-Sinc True-Peak
   next.limiter.softClipEnabled = slam > 0.42;
   next.limiter.softClipMode = effectiveGenre === 'acoustic_chill' ? 'warm_tanh' : 'crisp_cubic';
   next.limiter.softClipThresholdDb = -1.7;
   next.limiter.softClipAmountPct = Math.round(clamp((slam - 0.3) * 80, 15, 60));
 
-  // 2. 808 / Bass Phone Translation + Sub Tightness
-  next.eqEnabled = true;
-  next.eqPhaseMode = slam > 0.6 || effectiveGenre === 'club_edm' ? 'linear' : 'minimum';
+  // Measure MP3-immune 60–1000 Hz body-anchored spectral deltas when source is present
+  let lowErr = 0;
+  let lowMidErr = 0;
+  let highMidErr = 0;
+  let highErr = 0;
+  let airErr = 0;
+  if (source) {
+    const srcEnergy = Object.fromEntries(
+      source.spectral.bands.map((b) => [b.id, b.energyDb])
+    ) as Record<string, number>;
+    const refBody = 0.5 * (ref.bands.low + ref.bands.lowMid);
+    const lowE = srcEnergy.low ?? -24;
+    const lowMidE = srcEnergy.lowMid ?? -24;
+    const peakBody = Math.max(lowE, lowMidE);
+    const srcBody = Math.abs(lowE - lowMidE) < 18 ? 0.5 * (lowE + lowMidE) : peakBody - 1.2;
 
-  // Band 0: Subsonic clean-up HPF
-  if (next.eqBands[0]) {
-    next.eqBands[0].enabled = true;
-    next.eqBands[0].freqHz = effectiveGenre === 'trap_hiphop' || effectiveGenre === 'afro_amapiano' ? 25 : 29;
+    lowErr = ref.bands.low - refBody - ((srcEnergy.low ?? srcBody) - srcBody);
+    lowMidErr = ref.bands.lowMid - refBody - ((srcEnergy.lowMid ?? srcBody) - srcBody);
+    highMidErr = ref.bands.highMid - refBody - ((srcEnergy.highMid ?? srcBody - 3) - srcBody);
+    highErr = ref.bands.high - refBody - ((srcEnergy.high ?? srcBody - 6) - srcBody);
+    airErr = ref.bands.air - refBody - ((srcEnergy.air ?? srcBody - 10) - srcBody);
   }
 
-  // Band 1: Sub/Low weight adapted to source low-band energy
-  const srcSubRel = source?.spectral.bands.find((b) => b.id === 'sub')?.relativeDb ?? -4;
-  const subTrim = srcSubRel > 2.0 ? -0.8 : 0.4;
+  // 2. 808 / Bass Phone Translation + Sub Tightness
+  next.eqEnabled = true;
+  next.eqPhaseMode = effectiveGenre === 'acoustic_chill' && slam < 0.4 ? 'minimum' : 'linear';
+
+  if (next.eqBands[0]) {
+    next.eqBands[0].enabled = true;
+    next.eqBands[0].freqHz =
+      effectiveGenre === 'trap_hiphop' || effectiveGenre === 'afro_amapiano' ? 25 : 29;
+  }
+
   if (next.eqBands[1]) {
     next.eqBands[1].enabled = true;
     next.eqBands[1].freqHz = effectiveGenre === 'afro_amapiano' ? 68 : 60;
-    next.eqBands[1].gainDb = Number(clamp((bass - 0.4) * 3.4 + subTrim, -1.5, 2.8).toFixed(1));
+    const spectralLow = source ? lowErr * 0.35 : 0;
+    next.eqBands[1].gainDb = Number(
+      clamp((bass - 0.5) * 3.0 + spectralLow, -3.0, 3.2).toFixed(1)
+    );
     next.eqBands[1].placement = 'mid';
   }
 
@@ -249,7 +287,7 @@ export function buildAutopilotMasteringChain(
         : 'tight_punch',
   };
 
-  // Stereo Bass Mono Lock (< 135 Hz phase-coherent punch)
+  // Stereo 24 dB/oct Linkwitz-Riley Bass Mono Lock (< 135 Hz phase-coherent punch)
   next.stereo.enabled = true;
   next.stereo.bassMonoEnabled = true;
   next.stereo.bassMonoHz =
@@ -261,8 +299,9 @@ export function buildAutopilotMasteringChain(
     next.eqBands[2].freqHz = 290;
     next.eqBands[2].q = 1.55;
     next.eqBands[2].placement = 'mid';
-    next.eqBands[2].gainDb = Number((-0.4 - vox * 1.4).toFixed(1));
-    next.eqBands[2].dynEnabled = vox > 0.35;
+    const spectralMud = source ? lowMidErr * 0.42 : -0.6;
+    next.eqBands[2].gainDb = Number(clamp(spectralMud - (vox - 0.5) * 1.4, -3.5, 2.0).toFixed(1));
+    next.eqBands[2].dynEnabled = vox > 0.35 || lowMidErr < -1.5;
     next.eqBands[2].dynThresholdDb = -21;
     next.eqBands[2].dynRangeDb = Number((-1.5 - vox * 2.5).toFixed(1));
   }
@@ -272,27 +311,60 @@ export function buildAutopilotMasteringChain(
     next.eqBands[3].freqHz = effectiveGenre === 'trap_hiphop' ? 3100 : 2800;
     next.eqBands[3].q = 1.05;
     next.eqBands[3].placement = 'mid';
-    next.eqBands[3].gainDb = Number(((vox - 0.35) * 3.6).toFixed(1));
+    const spectralVox = source ? highMidErr * 0.42 : 0;
+    next.eqBands[3].gainDb = Number(
+      clamp(spectralVox + (vox - 0.5) * 3.2, -2.5, 3.2).toFixed(1)
+    );
+  }
+
+  if (next.eqBands[4]) {
+    next.eqBands[4].enabled = true;
+    const spectralHigh = source ? highErr * 0.38 : 0;
+    next.eqBands[4].gainDb = Number(
+      clamp(spectralHigh + (vox - 0.5) * 1.4, -2.5, 2.8).toFixed(1)
+    );
   }
 
   // Automatic Spectral Stabilizer protects ears whenever vocals/loudness are pushed
+  const maxPeakProminence = source
+    ? Math.max(
+        0,
+        ...source.spectral.bins
+          .filter((b) => b.freqHz >= 250 && b.freqHz <= 10000)
+          .map((b) => b.relativeDb)
+      )
+    : 0;
   const isSourceBright = (source?.spectral.spectralTiltDbPerOct ?? -3.6) > -3.1;
   next.stabilizer.enabled = true;
   next.stabilizer.mode = vox > 0.65 ? 'de_ess' : 'tame_harshness';
   next.stabilizer.amountPct = Math.round(
-    clamp(28 + vox * 26 + (isSourceBright ? 14 : 0), 20, 68)
+    clamp(
+      28 + vox * 24 + (isSourceBright ? 12 : 0) + (maxPeakProminence > 5.5 ? 14 : 0),
+      20,
+      68
+    )
   );
   next.stabilizer.maxReductionDb = Number((3.5 + vox * 2.5).toFixed(1));
 
-  // 4. Chorus Bloom, Stereo Width & Analog Harmonic Polish
-  next.stereo.widthPct = Math.round(clamp(98 + (bloom - 0.3) * 26, 95, 122));
-  next.stereo.highWidthPct = Math.round(clamp(104 + bloom * 28, 100, 134));
+  // 4. Chorus Bloom, Phase-Safe Stereo Width & Analog Harmonic Polish
+  const corr = source?.stereo.correlation ?? 0.68;
+  if (corr < 0.28) {
+    next.stereo.widthPct = 94;
+    next.stereo.highWidthPct = 98;
+  } else {
+    const corrTrim = source ? clamp((corr - 0.68) * 24, -8, 12) : 0;
+    next.stereo.widthPct = Math.round(clamp(98 + (bloom - 0.3) * 24 + corrTrim, 94, 124));
+    next.stereo.highWidthPct = Math.round(clamp(104 + bloom * 26 + corrTrim, 98, 134));
+  }
 
   if (next.eqBands[5]) {
     next.eqBands[5].enabled = true;
     next.eqBands[5].freqHz = 11500;
     next.eqBands[5].placement = 'side';
-    next.eqBands[5].gainDb = Number(clamp((bloom - 0.25) * 2.8, 0, 2.4).toFixed(1));
+    const spectralAir = source ? airErr * 0.35 : 0;
+    next.eqBands[5].gainDb = Number(
+      clamp((bloom - 0.35) * 2.4 + spectralAir, -2.0, 3.0).toFixed(1)
+    );
   }
 
   next.exciter.enabled = true;
@@ -305,14 +377,39 @@ export function buildAutopilotMasteringChain(
   next.exciter.drivePct = Math.round(clamp(14 + bloom * 24 + slam * 10, 10, 46));
   next.exciter.mixPct = Math.round(clamp(22 + bloom * 22, 18, 48));
 
+  // 5. Pre-Clipped / Hot Bedroom Mix Protection vs Wide-Dynamic Glue
+  if (source) {
+    const isAlreadyDense =
+      source.dynamics.plrDb < 9.2 || source.loudness.integratedLufs > -10.5;
+    if (isAlreadyDense) {
+      for (const b of next.multiband.bands) {
+        b.ratio = 1.22;
+        b.thresholdDb = -14.5;
+        b.makeupDb = 0;
+      }
+      next.exciter.drivePct = Math.min(next.exciter.drivePct, 14);
+      next.limiter.transientEmphasisPct = Math.max(next.limiter.transientEmphasisPct, 52);
+    } else if (source.dynamics.plrDb > 15.0) {
+      next.multiband.bands[0].ratio = 2.2;
+      next.multiband.bands[0].thresholdDb = -20.5;
+      next.multiband.bands[1].ratio = 1.8;
+      next.multiband.bands[1].thresholdDb = -21.5;
+    }
+  }
+
   // Section-Aware Macro-Dynamics so Chorus explodes wider & louder than Verse!
   next.macroDynamics = {
     enabled: bloom > 0.2,
     chorusLiftDb: Number(clamp(0.4 + bloom * 1.3, 0.3, 1.8).toFixed(2)),
-    chorusWidthBoostPct: Math.round(clamp(6 + bloom * 18, 4, 24)),
+    chorusWidthBoostPct: corr < 0.28 ? 4 : Math.round(clamp(6 + bloom * 18, 4, 24)),
     chorusAirBoostDb: Number(clamp(0.4 + bloom * 1.2, 0.2, 1.7).toFixed(2)),
     verseIntimacyPct: Math.round(clamp(20 + bloom * 35, 15, 55)),
   };
+
+  // Apply surgical Mix Doctor auto-fixes when provided
+  for (const issue of issues) {
+    next = applyMixDoctorAutoFix(next, issue);
+  }
 
   return next;
 }
