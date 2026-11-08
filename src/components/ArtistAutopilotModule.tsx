@@ -1,6 +1,12 @@
 import React, { useMemo, useState } from 'react';
+import { decodeUploadedAudioFile } from '../audio/decodeAudioFile';
 import { dspWorker } from '../audio/dspWorkerClient';
 import type { AuditionMode } from '../audio/playbackEngine';
+import {
+  type AlbumTrackInput,
+  computeAlbumCohesionPlan,
+  generateAlbumQcReportHtml,
+} from '../dsp/albumCohesion';
 import {
   type AutoMasterIntensity,
   AUTOPILOT_GENRE_CARDS,
@@ -12,6 +18,7 @@ import {
   computeArtistReadinessScorecard,
 } from '../dsp/autopilotEngine';
 import { applyMixDoctorAutoFix } from '../dsp/mixDoctor';
+import { createDefaultMasteringParams } from '../dsp/profiles';
 import type {
   AudioAnalysisReport,
   CodecAuditResult,
@@ -947,15 +954,116 @@ export const ArtistAutopilotModule: React.FC<Props> = ({
                 {packProgress}
               </div>
             )}
-            <button
-              type="button"
-              className="btn btn-primary"
-              style={{ width: '100%', justifyContent: 'center', padding: '10px 14px', fontSize: 13 }}
-              disabled={!sourceBuffer || Boolean(packProgress && packProgress.startsWith('1/4'))}
-              onClick={() => void handleDownloadReleasePackZip()}
-            >
-              Download Complete Release Pack (.zip)
-            </button>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                style={{ width: '100%', justifyContent: 'center', padding: '10px 14px', fontSize: 13 }}
+                disabled={!sourceBuffer || Boolean(packProgress && packProgress.startsWith('1/4'))}
+                onClick={() => void handleDownloadReleasePackZip()}
+              >
+                Download Complete Release Pack (.zip)
+              </button>
+
+              <label
+                className="btn"
+                style={{
+                  width: '100%',
+                  justifyContent: 'center',
+                  padding: '9px 14px',
+                  fontSize: 12.5,
+                  cursor: 'pointer',
+                  textAlign: 'center',
+                }}
+              >
+                💿 Batch Master Cohesive EP / Album (2–12 Songs → .zip)
+                <input
+                  type="file"
+                  multiple
+                  accept="audio/*,.wav,.flac,.mp3,.ogg,.m4a"
+                  style={{ display: 'none' }}
+                  onChange={async (e) => {
+                    const list = Array.from(e.target.files ?? []).slice(0, 12);
+                    e.currentTarget.value = '';
+                    if (list.length === 0) return;
+                    try {
+                      const inputs: AlbumTrackInput[] = [];
+                      for (let i = 0; i < list.length; i++) {
+                        setPackProgress(
+                          `EP Analysis ${i + 1}/${list.length}: "${list[i].name}"...`
+                        );
+                        const decoded = await decodeUploadedAudioFile(list[i]);
+                        const [rep, diag] = await Promise.all([
+                          dspWorker.analyze(decoded, -1.0, 16),
+                          dspWorker.diagnoseSource(decoded, createDefaultMasteringParams('spotify')),
+                        ]);
+                        inputs.push({
+                          name: list[i].name,
+                          buffer: decoded,
+                          analysis: rep,
+                          issues: diag.issues,
+                          sweetSpot: diag.sweetSpot,
+                        });
+                      }
+                      const plans = computeAlbumCohesionPlan({
+                        tracks: inputs,
+                        genre: macros.genre,
+                        intensity: proAutoIntensity,
+                        albumTitle: params.exportFormat.metadata?.album || 'SonicForge Studio EP',
+                        artistName: params.exportFormat.metadata?.artist || '',
+                      });
+                      const entries: ZipFileEntry[] = [];
+                      const qcResults: Array<{
+                        plan: (typeof plans)[number];
+                        masterAnalysis: AudioAnalysisReport;
+                      }> = [];
+                      for (let i = 0; i < plans.length; i++) {
+                        const plan = plans[i];
+                        setPackProgress(
+                          `Mastering EP Track ${i + 1}/${plans.length}: "${plan.name}" (${plan.roleLabel} @ ${plan.targetLufs.toFixed(1)} LUFS)...`
+                        );
+                        const res = await dspWorker.renderStereo(inputs[i].buffer, plan.params);
+                        const safeName =
+                          plan.name.replace(/\.[^.]+$/, '').replace(/[^a-z0-9_-]+/gi, '_') ||
+                          `Track_${i + 1}`;
+                        entries.push({
+                          filename: `${String(plan.trackNumber).padStart(2, '0')}_${safeName}_Master_24bit.wav`,
+                          data: new Uint8Array(encodeWav(res.buffer, plan.params.exportFormat)),
+                        });
+                        qcResults.push({ plan, masterAnalysis: res.analysis });
+                      }
+                      entries.push({
+                        filename: '00_EP_Album_Mastering_QC_Certificate.html',
+                        data: new TextEncoder().encode(
+                          generateAlbumQcReportHtml({
+                            albumTitle:
+                              params.exportFormat.metadata?.album || 'SonicForge Studio EP',
+                            results: qcResults,
+                          })
+                        ),
+                      });
+                      const zipBuf = createZipArchive(entries);
+                      const blob = new Blob([zipBuf], { type: 'application/zip' });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `SonicForge_EP_Master_${plans.length}_Tracks_24bit.zip`;
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      setTimeout(() => URL.revokeObjectURL(url), 5000);
+                      setPackProgress(
+                        `✓ Sequenced & exported ${plans.length}-track EP Master Pack (.zip)!`
+                      );
+                    } catch (err) {
+                      setPackProgress(
+                        err instanceof Error ? err.message : 'EP batch mastering failed.'
+                      );
+                    }
+                  }}
+                />
+              </label>
+            </div>
           </div>
         </div>
       </div>

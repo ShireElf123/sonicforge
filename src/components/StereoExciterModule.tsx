@@ -4,6 +4,7 @@ import type {
   DetectedSection,
   ExciterParams,
   MacroDynamicsParams,
+  MasteringPolishV5Params,
   PhantomBassParams,
   StereoStageParams,
 } from '../dsp/types';
@@ -13,6 +14,7 @@ interface Props {
   exciter: ExciterParams;
   phantomBass?: PhantomBassParams;
   macroDynamics?: MacroDynamicsParams;
+  polishV5?: MasteringPolishV5Params;
   detectedSections?: DetectedSection[];
   sourceAnalysis: AudioAnalysisReport | null;
   masterAnalysis: AudioAnalysisReport | null;
@@ -20,6 +22,7 @@ interface Props {
   onChangeExciter: (next: ExciterParams) => void;
   onChangePhantomBass?: (next: PhantomBassParams) => void;
   onChangeMacroDynamics?: (next: MacroDynamicsParams) => void;
+  onChangePolishV5?: (next: MasteringPolishV5Params) => void;
 }
 
 export const StereoExciterModule: React.FC<Props> = ({
@@ -27,6 +30,7 @@ export const StereoExciterModule: React.FC<Props> = ({
   exciter,
   phantomBass,
   macroDynamics,
+  polishV5,
   detectedSections,
   sourceAnalysis,
   masterAnalysis,
@@ -34,6 +38,7 @@ export const StereoExciterModule: React.FC<Props> = ({
   onChangeExciter,
   onChangePhantomBass,
   onChangeMacroDynamics,
+  onChangePolishV5,
 }) => {
   const pb: PhantomBassParams = phantomBass ?? {
     enabled: false,
@@ -47,6 +52,14 @@ export const StereoExciterModule: React.FC<Props> = ({
     chorusWidthBoostPct: 14,
     chorusAirBoostDb: 1.0,
     verseIntimacyPct: 30,
+  };
+  const pol: MasteringPolishV5Params = polishV5 ?? {
+    declipEnabled: false,
+    transientRecoveryPct: 0,
+    vocalDeEsserEnabled: true,
+    vocalDeEsserAmountPct: 35,
+    upwardMicroLiftPct: 24,
+    headTailDeClickEnabled: true,
   };
   const activeStereo = masterAnalysis?.stereo ?? sourceAnalysis?.stereo;
   const pts = activeStereo?.vectorscopePoints ?? [];
@@ -164,12 +177,12 @@ export const StereoExciterModule: React.FC<Props> = ({
           </div>
         </div>
 
-        {/* 2x Oversampled Harmonic Exciter */}
+        {/* 4x Polyphase Kaiser-Sinc M/S Analog Harmonic Exciter */}
         <div className="panel">
           <div className="panel-header">
             <div className="panel-title">
-              <span>2x Oversampled Analog Harmonic Exciter</span>
-              <span className="badge">Anti-Aliased Half-Band LP</span>
+              <span>4x Polyphase M/S Analog Harmonic Exciter</span>
+              <span className="badge badge-cyan">Mid Even Warmth + Side Odd Air (4x Sinc)</span>
             </div>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <input
@@ -396,6 +409,103 @@ export const StereoExciterModule: React.FC<Props> = ({
                     onChangeMacroDynamics({ ...md, verseIntimacyPct: Number(e.target.value) })
                   }
                 />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* v5.0 Mastering-House Polish: De-Clipper, Drum Transient Recovery, Split-Band Vocal De-Esser & Upward Inflator */}
+        {onChangePolishV5 && (
+          <div className="panel">
+            <div className="panel-header">
+              <div className="panel-title">
+                <span>Mastering-House Polish v5.0 (De-Clip • Transient Recovery • Vocal De-Esser • Upward Inflator)</span>
+                <span className="badge badge-emerald">Sterling / Pro-DS / Inflator Topology</span>
+              </div>
+            </div>
+
+            <div className="param-grid">
+              <div className="param-card">
+                <div className="param-row">
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, color: 'var(--text-0)' }}>
+                    <input
+                      type="checkbox"
+                      checked={pol.declipEnabled}
+                      onChange={(e) =>
+                        onChangePolishV5({ ...pol, declipEnabled: e.target.checked })
+                      }
+                    />
+                    Cubic Hermite Waveform De-Clipper
+                  </label>
+                </div>
+                <div style={{ fontSize: 10.5, color: 'var(--text-2)', marginBottom: 6 }}>
+                  Reconstructs flat-topped digital peaks on hot DAW bounces before -16.5 LUFS gain staging.
+                </div>
+
+                <div className="param-row">
+                  <span>Drum Transient Recovery (65Hz–6.2kHz)</span>
+                  <span className="param-val">{pol.transientRecoveryPct}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={80}
+                  value={pol.transientRecoveryPct}
+                  onChange={(e) =>
+                    onChangePolishV5({ ...pol, transientRecoveryPct: Number(e.target.value) })
+                  }
+                />
+              </div>
+
+              <div className="param-card">
+                <div className="param-row">
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, color: 'var(--text-0)' }}>
+                    <input
+                      type="checkbox"
+                      checked={pol.vocalDeEsserEnabled}
+                      onChange={(e) =>
+                        onChangePolishV5({ ...pol, vocalDeEsserEnabled: e.target.checked })
+                      }
+                    />
+                    Split-Band Mid Vocal De-Esser
+                  </label>
+                  <span className="param-val">{pol.vocalDeEsserAmountPct}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={pol.vocalDeEsserAmountPct}
+                  disabled={!pol.vocalDeEsserEnabled}
+                  onChange={(e) =>
+                    onChangePolishV5({ ...pol, vocalDeEsserAmountPct: Number(e.target.value) })
+                  }
+                />
+
+                <div className="param-row" style={{ marginTop: 4 }}>
+                  <span>Parallel Upward Inflator Density</span>
+                  <span className="param-val">{pol.upwardMicroLiftPct}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={70}
+                  value={pol.upwardMicroLiftPct}
+                  onChange={(e) =>
+                    onChangePolishV5({ ...pol, upwardMicroLiftPct: Number(e.target.value) })
+                  }
+                />
+
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-1)', marginTop: 4 }}>
+                  <input
+                    type="checkbox"
+                    checked={pol.headTailDeClickEnabled}
+                    onChange={(e) =>
+                      onChangePolishV5({ ...pol, headTailDeClickEnabled: e.target.checked })
+                    }
+                  />
+                  Zero-Click Head/Tail Boundary Polish
+                </label>
               </div>
             </div>
           </div>

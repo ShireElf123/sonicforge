@@ -1348,6 +1348,7 @@ export const App: React.FC = () => {
               exciter={params.exciter}
               phantomBass={params.phantomBass}
               macroDynamics={params.macroDynamics}
+              polishV5={params.polishV5}
               detectedSections={detectedSections}
               sourceAnalysis={sourceAnalysis}
               masterAnalysis={masterAnalysis}
@@ -1359,6 +1360,7 @@ export const App: React.FC = () => {
               onChangeMacroDynamics={(macroDynamics) =>
                 updateParams((prev) => ({ ...prev, macroDynamics }))
               }
+              onChangePolishV5={(polishV5) => updateParams((prev) => ({ ...prev, polishV5 }))}
             />
           )}
 

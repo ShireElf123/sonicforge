@@ -250,6 +250,14 @@ export function createDefaultMasteringParams(
       chorusAirBoostDb: 1.0,
       verseIntimacyPct: 30,
     },
+    polishV5: {
+      declipEnabled: false,
+      transientRecoveryPct: 0,
+      vocalDeEsserEnabled: true,
+      vocalDeEsserAmountPct: 35,
+      upwardMicroLiftPct: 22,
+      headTailDeClickEnabled: false,
+    },
     limiter: {
       enabled: true,
       autoGainToTarget: true,
@@ -302,6 +310,14 @@ export function createNeutralBypassParams(): MasteringChainParams {
       chorusWidthBoostPct: 0,
       chorusAirBoostDb: 0,
       verseIntimacyPct: 0,
+    },
+    polishV5: {
+      declipEnabled: false,
+      transientRecoveryPct: 0,
+      vocalDeEsserEnabled: false,
+      vocalDeEsserAmountPct: 0,
+      upwardMicroLiftPct: 0,
+      headTailDeClickEnabled: false,
     },
     limiter: {
       ...base.limiter,

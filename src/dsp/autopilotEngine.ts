@@ -406,6 +406,31 @@ export function buildAutopilotMasteringChain(
     verseIntimacyPct: Math.round(clamp(20 + bloom * 35, 15, 55)),
   };
 
+  // 6. v5.0 Mastering-House Polish (Cubic Hermite De-Clip, Transient Recovery, Split-Band Vocal De-Esser & Upward Inflator)
+  const hasClippedPeaks = Boolean(
+    source &&
+      (source.truePeak.clippedSampleCount > 0 ||
+        source.truePeak.samplePeakDbfs > -0.18 ||
+        source.truePeak.truePeakDbtp > -0.05)
+  );
+  const squashedPlrDeficit = source ? Math.max(0, 10.5 - source.dynamics.plrDb) : 0;
+  next.polishV5 = {
+    declipEnabled: hasClippedPeaks,
+    transientRecoveryPct: Math.round(clamp(squashedPlrDeficit * 12, 0, 52)),
+    vocalDeEsserEnabled: true,
+    vocalDeEsserAmountPct: Math.round(
+      clamp(28 + vox * 34 + (isSourceBright ? 10 : 0), 22, 68)
+    ),
+    upwardMicroLiftPct: Math.round(
+      clamp(
+        effectiveGenre === 'acoustic_chill' ? 14 + slam * 12 : 18 + slam * 18 + bloom * 8,
+        12,
+        42
+      )
+    ),
+    headTailDeClickEnabled: true,
+  };
+
   // Apply surgical Mix Doctor auto-fixes when provided
   for (const issue of issues) {
     next = applyMixDoctorAutoFix(next, issue);
@@ -620,19 +645,44 @@ export function computeAdaptiveAutoMasterParams(opts: {
       params.dcBlockEnabled = true;
     }
 
-    // 3. Pre-Squashed / Hot Bedroom Mix Protection (prevents double-compressing already clipped mixes!)
+    // 3. Pre-Squashed / Clipped Bedroom Mix Rescue (Cubic Hermite De-Clip + Drum Transient Recovery!)
+    const hasClippedPeaks =
+      source.truePeak.clippedSampleCount > 0 ||
+      source.truePeak.samplePeakDbfs > -0.18 ||
+      source.truePeak.truePeakDbtp > -0.05;
     const isAlreadyDense =
       source.dynamics.plrDb < 9.2 || source.loudness.integratedLufs > -10.5;
-    if (isAlreadyDense) {
-      for (const b of params.multiband.bands) {
-        b.ratio = 1.22;
-        b.thresholdDb = -14.5;
-        b.makeupDb = 0;
+
+    if (params.polishV5) {
+      params.polishV5.declipEnabled = hasClippedPeaks;
+      if (isAlreadyDense) {
+        params.polishV5.transientRecoveryPct = Math.max(
+          params.polishV5.transientRecoveryPct,
+          Math.round(clamp((10.8 - source.dynamics.plrDb) * 13, 24, 55))
+        );
       }
-      params.exciter.drivePct = Math.min(params.exciter.drivePct, 14);
-      params.limiter.transientEmphasisPct = Math.max(params.limiter.transientEmphasisPct, 52);
+      params.polishV5.upwardMicroLiftPct =
+        intensity === 'warm_smooth'
+          ? 20
+          : intensity === 'loud_punchy'
+            ? 36
+            : 28;
+    }
+
+    if (isAlreadyDense || hasClippedPeaks) {
+      if (isAlreadyDense) {
+        for (const b of params.multiband.bands) {
+          b.ratio = 1.22;
+          b.thresholdDb = -14.5;
+          b.makeupDb = 0;
+        }
+        params.exciter.drivePct = Math.min(params.exciter.drivePct, 14);
+        params.limiter.transientEmphasisPct = Math.max(params.limiter.transientEmphasisPct, 52);
+      }
       summaryActions.push(
-        `Detected dense/hot mix (${source.loudness.integratedLufs.toFixed(1)} LUFS) — protected transients from double-compression`
+        hasClippedPeaks
+          ? `Cubic Hermite De-Clipper + Transient Recovery rebuilt clipped peaks & restored drum snap`
+          : `Detected dense mix (${source.loudness.integratedLufs.toFixed(1)} LUFS) — recovered drum transients & avoided double-compression`
       );
     } else if (source.dynamics.plrDb > 15.0) {
       // Wide-dynamic raw mix: engage smooth 4-band LR4 glue before the limiter

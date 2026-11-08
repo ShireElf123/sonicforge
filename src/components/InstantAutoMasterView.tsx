@@ -1,6 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { decodeUploadedAudioFile } from '../audio/decodeAudioFile';
 import { dspWorker } from '../audio/dspWorkerClient';
 import type { AuditionMode, MonitorVoicing } from '../audio/playbackEngine';
+import {
+  type AlbumTrackInput,
+  computeAlbumCohesionPlan,
+  generateAlbumQcReportHtml,
+} from '../dsp/albumCohesion';
 import {
   type AutoMasterIntensity,
   AUTOPILOT_GENRE_CARDS,
@@ -8,6 +14,7 @@ import {
   computeAdaptiveAutoMasterParams,
   computeArtistReadinessScorecard,
 } from '../dsp/autopilotEngine';
+import { createDefaultMasteringParams } from '../dsp/profiles';
 import type {
   AudioAnalysisReport,
   CodecAuditResult,
@@ -98,6 +105,97 @@ export const InstantAutoMasterView: React.FC<Props> = ({
   const [summaryActions, setSummaryActions] = useState<string[]>([]);
   const [resolvedGenreLabel, setResolvedGenreLabel] = useState<string>('Auto-Detected');
   const [zipStatus, setZipStatus] = useState<string | null>(null);
+  const [albumStatus, setAlbumStatus] = useState<string | null>(null);
+
+  const handleBatchMasterEp = async (files: FileList | File[]) => {
+    const list = Array.from(files).slice(0, 12);
+    if (list.length === 0) return;
+    if (list.length === 1) {
+      onUploadTrack(list[0]);
+      return;
+    }
+
+    try {
+      const inputs: AlbumTrackInput[] = [];
+      for (let i = 0; i < list.length; i++) {
+        const f = list[i];
+        setAlbumStatus(
+          `Analyzing Track ${i + 1}/${list.length}: "${f.name}" (LUFS, Spectrum & Mix Doctor)...`
+        );
+        const decoded = await decodeUploadedAudioFile(f);
+        const [rep, diag] = await Promise.all([
+          dspWorker.analyze(decoded, -1.0, 16),
+          dspWorker.diagnoseSource(decoded, createDefaultMasteringParams('spotify')),
+        ]);
+        inputs.push({
+          name: f.name,
+          buffer: decoded,
+          analysis: rep,
+          issues: diag.issues,
+          sweetSpot: diag.sweetSpot,
+        });
+      }
+
+      setAlbumStatus(
+        `Computing EP Spectral Cohesion & Musical Loudness Sequencing across ${inputs.length} tracks...`
+      );
+      const plans = computeAlbumCohesionPlan({
+        tracks: inputs,
+        genre: selectedGenre,
+        intensity,
+        albumTitle: 'SonicForge Cohesive EP Master',
+      });
+
+      const entries: ZipFileEntry[] = [];
+      const qcResults: Array<{ plan: (typeof plans)[number]; masterAnalysis: AudioAnalysisReport }> =
+        [];
+
+      for (let i = 0; i < plans.length; i++) {
+        const plan = plans[i];
+        const src = inputs[i];
+        setAlbumStatus(
+          `Mastering Track ${i + 1}/${plans.length}: "${plan.name}" (${plan.roleLabel} @ ${plan.targetLufs.toFixed(1)} LUFS)...`
+        );
+        const rendered = await dspWorker.renderStereo(src.buffer, plan.params);
+        const wavBytes = new Uint8Array(encodeWav(rendered.buffer, plan.params.exportFormat));
+        const safeName =
+          plan.name.replace(/\.[^.]+$/, '').replace(/[^a-z0-9_-]+/gi, '_') || `Track_${i + 1}`;
+        entries.push({
+          filename: `${String(plan.trackNumber).padStart(2, '0')}_${safeName}_Master_24bit.wav`,
+          data: wavBytes,
+        });
+        qcResults.push({ plan, masterAnalysis: rendered.analysis });
+      }
+
+      const qcHtml = generateAlbumQcReportHtml({
+        albumTitle: 'SonicForge Cohesive EP Master',
+        results: qcResults,
+      });
+      entries.push({
+        filename: '00_EP_Album_Mastering_QC_Certificate.html',
+        data: new TextEncoder().encode(qcHtml),
+      });
+
+      const zipBytes = createZipArchive(entries);
+      const blob = new Blob([zipBytes], { type: 'application/zip' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `SonicForge_EP_Master_${plans.length}_Tracks_24bit.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+      // Also load Track 1 into the live player so the user can audition immediately
+      onUploadTrack(list[0]);
+      setAlbumStatus(
+        `✓ Mastered & sequenced all ${plans.length} EP tracks into SonicForge_EP_Master_${plans.length}_Tracks_24bit.zip!`
+      );
+    } catch (err) {
+      setAlbumStatus(err instanceof Error ? err.message : 'EP batch mastering failed.');
+    }
+  };
 
   const lastAutoKeyRef = useRef<{ buf: PlanarAudioBuffer | null; hasSweetSpot: boolean }>({
     buf: null,
@@ -269,8 +367,12 @@ export const InstantAutoMasterView: React.FC<Props> = ({
         onDrop={(e) => {
           e.preventDefault();
           setDragOver(false);
-          const file = e.dataTransfer.files?.[0];
-          if (file) onUploadTrack(file);
+          if (e.dataTransfer.files && e.dataTransfer.files.length > 1) {
+            void handleBatchMasterEp(e.dataTransfer.files);
+          } else {
+            const file = e.dataTransfer.files?.[0];
+            if (file) onUploadTrack(file);
+          }
         }}
         style={{
           padding: '22px 24px',
@@ -281,7 +383,7 @@ export const InstantAutoMasterView: React.FC<Props> = ({
         }}
       >
         <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--cyan)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-          Step 1 — Add Your Unmastered Song
+          Step 1 — Add Your Unmastered Song (Or Drop Multiple Songs for an EP)
         </div>
         <h2 style={{ margin: '6px 0 6px', fontSize: 20, color: 'var(--text-0)' }}>
           Drop Your Track Here &amp; Pick a Genre Below
@@ -291,28 +393,72 @@ export const InstantAutoMasterView: React.FC<Props> = ({
           <strong style={{ color: 'var(--text-0)' }}>{trackName}</strong>
         </p>
 
-        <label
-          className="btn btn-primary"
-          style={{
-            display: 'inline-flex',
-            padding: '10px 20px',
-            fontSize: 13.5,
-            cursor: 'pointer',
-            borderRadius: 8,
-          }}
-        >
-          + Upload Your Song (WAV / MP3 / FLAC)
-          <input
-            type="file"
-            accept="audio/*,.wav,.flac,.mp3,.ogg,.m4a"
-            style={{ display: 'none' }}
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) onUploadTrack(f);
-              e.currentTarget.value = '';
+        <div style={{ display: 'flex', justifyContent: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <label
+            className="btn btn-primary"
+            style={{
+              display: 'inline-flex',
+              padding: '10px 20px',
+              fontSize: 13.5,
+              cursor: 'pointer',
+              borderRadius: 8,
             }}
-          />
-        </label>
+          >
+            + Upload Single Song (WAV / MP3 / FLAC)
+            <input
+              type="file"
+              accept="audio/*,.wav,.flac,.mp3,.ogg,.m4a"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) onUploadTrack(f);
+                e.currentTarget.value = '';
+              }}
+            />
+          </label>
+
+          <label
+            className="btn"
+            style={{
+              display: 'inline-flex',
+              padding: '10px 16px',
+              fontSize: 13,
+              cursor: 'pointer',
+              borderRadius: 8,
+            }}
+          >
+            💿 Master Full EP / Album (2–12 Songs → .zip)
+            <input
+              type="file"
+              multiple
+              accept="audio/*,.wav,.flac,.mp3,.ogg,.m4a"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                if (e.target.files && e.target.files.length > 0) {
+                  void handleBatchMasterEp(e.target.files);
+                }
+                e.currentTarget.value = '';
+              }}
+            />
+          </label>
+        </div>
+
+        {albumStatus && (
+          <div
+            style={{
+              marginTop: 12,
+              padding: '8px 12px',
+              borderRadius: 8,
+              background: 'rgba(34, 211, 238, 0.1)',
+              border: '1px solid rgba(34, 211, 238, 0.35)',
+              fontSize: 12,
+              color: 'var(--cyan)',
+              fontWeight: 600,
+            }}
+          >
+            {albumStatus}
+          </div>
+        )}
       </div>
 
       {/* STEP 2: PICK YOUR GENRE BUTTON & STYLE — AUTO-MASTERS IMMEDIATELY */}

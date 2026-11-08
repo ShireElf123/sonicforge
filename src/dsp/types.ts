@@ -208,6 +208,20 @@ export interface MacroDynamicsParams {
   verseIntimacyPct: number;
 }
 
+export interface MasteringPolishV5Params {
+  /** Cubic Hermite Spline Waveform De-Clipper for flat-topped digital peaks */
+  declipEnabled: boolean;
+  /** Band-focused (65 Hz–6.2 kHz) differential drum transient recovery (0..100%) */
+  transientRecoveryPct: number;
+  /** Level-independent Mid-channel 5.2–10.2 kHz vocal sibilance de-esser */
+  vocalDeEsserEnabled: boolean;
+  vocalDeEsserAmountPct: number;
+  /** Parallel upward micro-detail / density lift in -44..-14 dBFS musical zone (0..100%) */
+  upwardMicroLiftPct: number;
+  /** Studio zero-crossing micro-fade polish at track start/end to prevent digital clicks */
+  headTailDeClickEnabled: boolean;
+}
+
 export type LimiterReleaseMode =
   | 'transparent'
   | 'irc_transient'
@@ -263,6 +277,7 @@ export interface MasteringChainParams {
   exciter: ExciterParams;
   phantomBass?: PhantomBassParams;
   macroDynamics?: MacroDynamicsParams;
+  polishV5?: MasteringPolishV5Params;
   limiter: LimiterParams;
   exportFormat: ExportFormatParams;
 }

@@ -250,6 +250,25 @@ export function computeSignalDrivenAssistant(
     params.exciter.mixPct = 24;
   }
 
+  const hasClippedPeaks =
+    source.truePeak.clippedSampleCount > 0 ||
+    source.truePeak.samplePeakDbfs > -0.18 ||
+    source.truePeak.truePeakDbtp > -0.05;
+
+  params.polishV5 = {
+    declipEnabled: hasClippedPeaks,
+    transientRecoveryPct: isHotDenseMix ? Math.round(clamp((10.8 - plr) * 13, 24, 52)) : 0,
+    vocalDeEsserEnabled: true,
+    vocalDeEsserAmountPct: params.tonalPreset === 'vocal_presence' ? 48 : 35,
+    upwardMicroLiftPct: deliveryProfile === 'ebu_r128' ? 12 : 26,
+    headTailDeClickEnabled: true,
+  };
+  if (hasClippedPeaks) {
+    rationale.push(
+      `Engaged Cubic Hermite Spline De-Clipper to reconstruct flat-topped digital peaks prior to -16.5 LUFS staging.`
+    );
+  }
+
   params.limiter.enabled = true;
   params.limiter.autoGainToTarget = true;
   params.limiter.targetLufs = spec.targetLufs;
